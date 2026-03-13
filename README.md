@@ -5,7 +5,9 @@
 
 [中文文档](README_cn.md)
 
-A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal.
+A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. 
+
+This is a native AI project, entirely written by AI.
 
 ## Features
 
