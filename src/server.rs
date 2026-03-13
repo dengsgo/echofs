@@ -12,8 +12,6 @@ pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget) {
     let state = Arc::new(AppState { root });
 
     let app = Router::new()
-        .route("/api/ls", get(handlers::api_ls_root))
-        .route("/api/ls/{*path}", get(handlers::api_ls_path))
         .route("/", get(handlers::serve_index))
         .route("/{*path}", get(handlers::serve_path))
         .layer(axum::middleware::from_fn_with_state(

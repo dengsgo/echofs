@@ -224,3 +224,156 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.1} {}", size, UNITS[unit_idx])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn format_size_zero() {
+        assert_eq!(format_size(0), "-");
+    }
+
+    #[test]
+    fn format_size_bytes() {
+        assert_eq!(format_size(100), "100 B");
+    }
+
+    #[test]
+    fn format_size_kb() {
+        assert_eq!(format_size(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn format_size_mb() {
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+    }
+
+    #[test]
+    fn format_size_gb() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn format_size_tb() {
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.0 TB");
+    }
+
+    #[test]
+    fn safe_resolve_root_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let resolved = safe_resolve(&root, "").unwrap();
+        assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn safe_resolve_valid_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("hello.txt"), "hi").unwrap();
+        let resolved = safe_resolve(&root, "hello.txt").unwrap();
+        assert_eq!(resolved, root.join("hello.txt"));
+    }
+
+    #[test]
+    fn safe_resolve_strips_leading_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("file.txt"), "data").unwrap();
+        let resolved = safe_resolve(&root, "/file.txt").unwrap();
+        assert_eq!(resolved, root.join("file.txt"));
+    }
+
+    #[test]
+    fn safe_resolve_traversal_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let result = safe_resolve(&root, "../../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn safe_resolve_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let result = safe_resolve(&root, "nonexistent.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn safe_resolve_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("subdir")).unwrap();
+        let resolved = safe_resolve(&root, "subdir").unwrap();
+        assert_eq!(resolved, root.join("subdir"));
+    }
+
+    #[test]
+    fn list_directory_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let listing = list_directory(&root, "").unwrap();
+        assert!(listing.entries.is_empty());
+        assert_eq!(listing.path, "/");
+    }
+
+    #[test]
+    fn list_directory_files_and_dirs_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("beta.txt"), "b").unwrap();
+        fs::write(root.join("alpha.txt"), "a").unwrap();
+        fs::create_dir(root.join("zdir")).unwrap();
+        let listing = list_directory(&root, "").unwrap();
+        // Directory should come first
+        assert!(listing.entries[0].is_dir);
+        assert_eq!(listing.entries[0].name, "zdir");
+        // Then files sorted alphabetically
+        assert_eq!(listing.entries[1].name, "alpha.txt");
+        assert_eq!(listing.entries[2].name, "beta.txt");
+    }
+
+    #[test]
+    fn list_directory_hidden_files_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join(".hidden"), "secret").unwrap();
+        fs::write(root.join("visible.txt"), "data").unwrap();
+        let listing = list_directory(&root, "").unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn list_directory_file_not_dir_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("file.txt"), "data").unwrap();
+        let result = list_directory(&root, "file.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_directory_nested_breadcrumbs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        let listing = list_directory(&root, "a/b").unwrap();
+        assert_eq!(listing.breadcrumbs.len(), 3); // Home, a, b
+        assert_eq!(listing.breadcrumbs[0].name, "Home");
+        assert_eq!(listing.breadcrumbs[1].name, "a");
+        assert_eq!(listing.breadcrumbs[2].name, "b");
+    }
+
+    #[test]
+    fn list_directory_href_percent_encoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::write(root.join("my file.txt"), "data").unwrap();
+        let listing = list_directory(&root, "").unwrap();
+        assert!(listing.entries[0].href.contains("my%20file.txt"));
+    }
+}

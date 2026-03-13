@@ -43,3 +43,72 @@ impl From<std::io::Error> for AppError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn not_found_status() {
+        let resp = AppError::NotFound("gone".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn forbidden_status() {
+        let resp = AppError::Forbidden("nope".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn bad_request_status() {
+        let resp = AppError::BadRequest("bad".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn internal_status() {
+        let resp = AppError::Internal("oops".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn display_not_found() {
+        let e = AppError::NotFound("test".into());
+        assert_eq!(format!("{}", e), "Not Found: test");
+    }
+
+    #[test]
+    fn display_forbidden() {
+        let e = AppError::Forbidden("test".into());
+        assert_eq!(format!("{}", e), "Forbidden: test");
+    }
+
+    #[test]
+    fn display_bad_request() {
+        let e = AppError::BadRequest("test".into());
+        assert_eq!(format!("{}", e), "Bad Request: test");
+    }
+
+    #[test]
+    fn from_io_not_found() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let app_err = AppError::from(io_err);
+        assert!(matches!(app_err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn from_io_permission_denied() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let app_err = AppError::from(io_err);
+        assert!(matches!(app_err, AppError::Forbidden(_)));
+    }
+
+    #[test]
+    fn from_io_other() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
+        let app_err = AppError::from(io_err);
+        assert!(matches!(app_err, AppError::Internal(_)));
+    }
+}

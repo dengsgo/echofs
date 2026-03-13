@@ -108,3 +108,86 @@ pub async fn build_range_response(
         Ok(response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_full_range() {
+        let r = parse_range("bytes=0-499", 1000).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.end, 499);
+    }
+
+    #[test]
+    fn parse_open_end_range() {
+        let r = parse_range("bytes=500-", 1000).unwrap();
+        assert_eq!(r.start, 500);
+        assert_eq!(r.end, 999);
+    }
+
+    #[test]
+    fn parse_suffix_range() {
+        let r = parse_range("bytes=-200", 1000).unwrap();
+        assert_eq!(r.start, 800);
+        assert_eq!(r.end, 999);
+    }
+
+    #[test]
+    fn parse_single_byte_range() {
+        let r = parse_range("bytes=0-0", 1000).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.end, 0);
+    }
+
+    #[test]
+    fn parse_end_clamped_to_file_size() {
+        let r = parse_range("bytes=0-9999", 500).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.end, 499);
+    }
+
+    #[test]
+    fn parse_last_byte() {
+        let r = parse_range("bytes=999-999", 1000).unwrap();
+        assert_eq!(r.start, 999);
+        assert_eq!(r.end, 999);
+    }
+
+    #[test]
+    fn reject_no_bytes_prefix() {
+        assert!(parse_range("0-499", 1000).is_none());
+    }
+
+    #[test]
+    fn reject_start_ge_file_size() {
+        assert!(parse_range("bytes=1000-", 1000).is_none());
+    }
+
+    #[test]
+    fn reject_start_gt_end() {
+        assert!(parse_range("bytes=500-100", 1000).is_none());
+    }
+
+    #[test]
+    fn reject_suffix_zero() {
+        assert!(parse_range("bytes=-0", 1000).is_none());
+    }
+
+    #[test]
+    fn reject_suffix_gt_file_size() {
+        assert!(parse_range("bytes=-2000", 1000).is_none());
+    }
+
+    #[test]
+    fn reject_empty_file() {
+        assert!(parse_range("bytes=0-0", 0).is_none());
+    }
+
+    #[test]
+    fn reject_garbage() {
+        assert!(parse_range("bytes=abc-def", 1000).is_none());
+        assert!(parse_range("garbage", 1000).is_none());
+    }
+}

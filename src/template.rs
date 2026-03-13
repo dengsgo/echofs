@@ -20,6 +20,7 @@ pub fn index_html() -> String {
   --card-bg: #ffffff;
   --shadow: 0 2px 12px rgba(0,0,0,0.08);
   --header-bg: rgba(251, 251, 253, 0.72);
+  --visited: #6e5494;
 }
 [data-theme="dark"] {
   --bg: #1d1d1f;
@@ -33,6 +34,7 @@ pub fn index_html() -> String {
   --card-bg: #2d2d2f;
   --shadow: 0 2px 12px rgba(0,0,0,0.3);
   --header-bg: rgba(37, 37, 39, 0.72);
+  --visited: #9b8ab8;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -204,7 +206,9 @@ body {
   word-break: break-word;
 }
 .file-name-cell a:hover { color: var(--accent); }
-.dir-link { color: var(--accent) !important; font-weight: 500; }
+.file-name-cell a:visited { color: var(--visited); }
+.dir-link { color: var(--accent); font-weight: 500; }
+.dir-link:visited { color: var(--visited); }
 .size-cell, .date-cell { color: var(--text-secondary); white-space: nowrap; }
 .action-cell { white-space: nowrap; }
 .btn {
@@ -270,6 +274,8 @@ body {
   text-decoration: none;
 }
 .card-name a.dir-link { color: var(--accent); }
+.card-name a.dir-link:visited { color: var(--visited); }
+.card-name a:visited { color: var(--visited); }
 .card-meta {
   font-size: 12px;
   color: var(--text-secondary);
@@ -484,9 +490,10 @@ body {
     const content = document.getElementById('content');
     content.innerHTML = '<div class="loading">Loading...</div>';
 
-    const apiPath = path === '/' ? '/api/ls' : '/api/ls' + path;
     try {
-      const resp = await fetch(apiPath);
+      const resp = await fetch(path, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      });
       if (!resp.ok) throw new Error('Failed to load directory');
       const data = await resp.json();
       currentEntries = data.entries;
@@ -630,25 +637,38 @@ body {
   }
 
   // Copy link
+  function copyFallback(text) {
+    var el = document.createElement('input');
+    el.setAttribute('readonly', '');
+    el.style.position = 'fixed';
+    el.style.left = '0';
+    el.style.top = '0';
+    el.style.opacity = '0';
+    el.value = text;
+    document.body.appendChild(el);
+    el.focus();
+    el.setSelectionRange(0, text.length);
+    var ok = document.execCommand('copy');
+    document.body.removeChild(el);
+    return ok;
+  }
   window.copyLink = function(href, btn) {
-    const url = location.origin + href;
-    navigator.clipboard.writeText(url).then(() => {
+    var url = location.origin + href;
+    function onSuccess() {
       btn.classList.add('copied');
-      const orig = btn.textContent;
+      var orig = btn.textContent;
       btn.textContent = 'Copied!';
-      setTimeout(() => { btn.classList.remove('copied'); btn.textContent = orig; }, 1500);
-    }).catch(() => {
-      const ta = document.createElement('textarea');
-      ta.value = url;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      btn.classList.add('copied');
-      const orig = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.classList.remove('copied'); btn.textContent = orig; }, 1500);
-    });
+      setTimeout(function() { btn.classList.remove('copied'); btn.textContent = orig; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(onSuccess).catch(function() {
+        copyFallback(url);
+        onSuccess();
+      });
+    } else {
+      copyFallback(url);
+      onSuccess();
+    }
   };
 
   // Media preview
@@ -712,4 +732,29 @@ body {
 </script>
 </body>
 </html>"##.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_empty() {
+        assert!(!index_html().is_empty());
+    }
+
+    #[test]
+    fn starts_with_doctype() {
+        assert!(index_html().starts_with("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn contains_echofs() {
+        assert!(index_html().contains("EchoFS"));
+    }
+
+    #[test]
+    fn contains_xhr_header() {
+        assert!(index_html().contains("X-Requested-With"));
+    }
 }

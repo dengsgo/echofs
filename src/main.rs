@@ -1,14 +1,5 @@
-mod cli;
-mod directory;
-mod error;
-mod handlers;
-mod logging;
-mod mime_utils;
-mod range;
-mod server;
-mod template;
-
 use clap::Parser;
+use echofs::{cli, logging, server};
 use cli::Args;
 use std::net::IpAddr;
 
@@ -78,7 +69,16 @@ async fn main() {
     let root = args.root_path();
     let addr = args.bind_addr();
 
-    println!("EchoFS serving {} on http://{}", root.display(), addr);
+    println!(r#"
+  ______
+ | ____  \
+ |      \_\________      ___      _          ___  ___
+ |          \ \ \  |    | __|__ | |_   ___  | __|| __|
+ |          | | |  |    | _|/ _|| ' \ / _ \ | _| |__ \
+ |          / / /  |    |___\__||_||_|\___/ |_|  |___/
+ |_________________|    v{}
+"#, env!("CARGO_PKG_VERSION"));
+    println!("Serving {} on http://{}", root.display(), addr);
 
     if args.bind == "0.0.0.0" || args.bind == "::" {
         println!("Available on:");

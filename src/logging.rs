@@ -45,6 +45,12 @@ pub async fn access_log(
 ) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
+    let is_xhr = request
+        .headers()
+        .get("X-Requested-With")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "XMLHttpRequest")
+        .unwrap_or(false);
     let start = std::time::Instant::now();
 
     let response = next.run(request).await;
@@ -53,10 +59,11 @@ pub async fn access_log(
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+    let kind = if is_xhr { 'A' } else { 'P' };
 
     let line = format!(
-        "[{}] {} {} {} {} {:.1}ms",
-        now, addr.ip(), method, uri, status, elapsed_ms,
+        "[{}] {} {} {} {} {} {:.1}ms",
+        now, addr.ip(), method, kind, uri, status, elapsed_ms,
     );
 
     match log_target.0.clone() {
@@ -71,4 +78,29 @@ pub async fn access_log(
     }
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_arg_stdout() {
+        let target = LogTarget::from_arg("stdout");
+        assert!(matches!(target, LogTarget::Stdout));
+    }
+
+    #[test]
+    fn from_arg_off() {
+        let target = LogTarget::from_arg("off");
+        assert!(matches!(target, LogTarget::Off));
+    }
+
+    #[test]
+    fn from_arg_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let target = LogTarget::from_arg(&path);
+        assert!(matches!(target, LogTarget::File(_)));
+    }
 }
