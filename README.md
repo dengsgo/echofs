@@ -26,11 +26,35 @@ This is a native AI project, entirely written by AI.
 
 ## Quick Start
 
-### Prerequisites
+### Download Pre-built Binaries
+
+You can download pre-built binaries directly from [GitHub Releases](https://github.com/dengsgo/echofs/releases):
+
+| Platform | Architecture | Download |
+|----------|-------------|----------|
+| Linux | AMD64 (x86_64) | [echofs-linux-amd64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-amd64.tar.gz) |
+| Linux | ARM64 | [echofs-linux-arm64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-arm64.tar.gz) |
+| macOS | AMD64 (Intel) | [echofs-darwin-amd64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-darwin-amd64.tar.gz) |
+| macOS | ARM64 (Apple Silicon) | [echofs-darwin-arm64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-darwin-arm64.tar.gz) |
+| Windows | AMD64 (x86_64) | [echofs-windows-amd64.zip](https://github.com/dengsgo/echofs/releases/latest/download/echofs-windows-amd64.zip) |
+
+**Quick install (Linux/macOS):**
+```bash
+# Download and extract (replace with your platform)
+curl -LO https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-amd64.tar.gz
+tar xzf echofs-linux-amd64.tar.gz
+sudo mv echofs /usr/local/bin/
+```
+
+### Build from Source
+
+If you prefer to build from source:
+
+#### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.90 or later
 
-### Build
+#### Build
 
 ```bash
 git clone https://github.com/dengsgo/echofs.git

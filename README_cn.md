@@ -26,11 +26,35 @@
 
 ## 快速开始
 
-### 前置条件
+### 下载预编译二进制文件
+
+你可以直接从 [GitHub Releases](https://github.com/dengsgo/echofs/releases) 下载预编译的二进制文件：
+
+| 平台 | 架构 | 下载链接 |
+|------|------|----------|
+| Linux | AMD64 (x86_64) | [echofs-linux-amd64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-amd64.tar.gz) |
+| Linux | ARM64 | [echofs-linux-arm64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-arm64.tar.gz) |
+| macOS | AMD64 (Intel) | [echofs-darwin-amd64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-darwin-amd64.tar.gz) |
+| macOS | ARM64 (Apple Silicon) | [echofs-darwin-arm64.tar.gz](https://github.com/dengsgo/echofs/releases/latest/download/echofs-darwin-arm64.tar.gz) |
+| Windows | AMD64 (x86_64) | [echofs-windows-amd64.zip](https://github.com/dengsgo/echofs/releases/latest/download/echofs-windows-amd64.zip) |
+
+**快速安装（Linux/macOS）：**
+```bash
+# 下载并解压（根据你的平台替换链接）
+curl -LO https://github.com/dengsgo/echofs/releases/latest/download/echofs-linux-amd64.tar.gz
+tar xzf echofs-linux-amd64.tar.gz
+sudo mv echofs /usr/local/bin/
+```
+
+### 从源码编译
+
+如果你希望从源码编译：
+
+#### 前置条件
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.90 或更高版本
 
-### 编译
+#### 编译
 
 ```bash
 git clone https://github.com/dengsgo/echofs.git
