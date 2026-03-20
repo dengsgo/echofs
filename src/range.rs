@@ -79,7 +79,7 @@ pub async fn build_range_response(
                     format!("bytes {}-{}/{}", range.start, range.end, file_size),
                 )
                 .body(body)
-                .unwrap();
+                .expect("valid 206 response with known headers");
 
             Ok(response)
         } else {
@@ -88,7 +88,7 @@ pub async fn build_range_response(
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(header::CONTENT_RANGE, format!("bytes */{}", file_size))
                 .body(Body::empty())
-                .unwrap();
+                .expect("valid 416 response with known headers");
             Ok(response)
         }
     } else {
@@ -103,7 +103,7 @@ pub async fn build_range_response(
             .header(header::CONTENT_LENGTH, file_size)
             .header(header::ACCEPT_RANGES, "bytes")
             .body(body)
-            .unwrap();
+            .expect("valid 200 response with known headers");
 
         Ok(response)
     }

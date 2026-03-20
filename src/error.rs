@@ -1,5 +1,7 @@
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+
+use crate::template;
 
 #[derive(Debug)]
 pub enum AppError {
@@ -20,15 +22,39 @@ impl std::fmt::Display for AppError {
     }
 }
 
+impl AppError {
+    fn status_and_message(&self) -> (StatusCode, &str, &str) {
+        match self {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "Not Found", msg),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "Forbidden", msg),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "Bad Request", msg),
+            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error", msg),
+        }
+    }
+
+    /// Return HTML error page for browser requests, JSON for AJAX requests.
+    pub fn into_response_for(self, headers: &HeaderMap) -> Response {
+        let is_xhr = headers
+            .get("X-Requested-With")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v == "XMLHttpRequest");
+
+        let (status, title, message) = self.status_and_message();
+
+        if is_xhr {
+            let body = serde_json::json!({ "error": message });
+            (status, axum::Json(body)).into_response()
+        } else {
+            let html = template::error_html(status.as_u16(), title, message);
+            (status, Html(html)).into_response()
+        }
+    }
+}
+
+/// Default IntoResponse: returns JSON (used as fallback when headers aren't available).
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-        };
-
+        let (status, _title, message) = self.status_and_message();
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
     }

@@ -21,7 +21,10 @@ This is a native AI project, entirely written by AI.
 - **Responsive Design** — Card-based layout on mobile, table layout on desktop, optimized for iPad and phones
 - **Frosted Glass Header** — Sticky header with `backdrop-filter` blur effect
 - **LAN Access Info** — When binding to `0.0.0.0`, displays all available local network addresses
-- **Security** — Path traversal protection via `canonicalize` + `starts_with` validation
+- **Security** — Path traversal protection via `canonicalize` + `starts_with`; hidden files/directories (`.env`, `.git`, etc.) are blocked from both listings and direct URL access by default (use `--show-hidden` to allow)
+- **Directory Depth Limiting** — Restrict how deep users can browse with `--max-depth` (e.g., `--max-depth 1` for one level of subdirectories, `0` for root only)
+- **HTML Error Pages** — Styled error pages for browser requests (404, 403, etc.), JSON errors for API clients
+- **Async I/O** — All filesystem operations run in `spawn_blocking` to avoid blocking the async runtime
 - **Access Logging** — Request logs to stdout (default), a file, or disabled entirely
 
 ## Quick Start
@@ -87,6 +90,8 @@ Options:
   -p, --port <PORT>  Port to listen on [default: 8080]
   -b, --bind <BIND>  Bind address [default: 0.0.0.0]
   -o, --open         Open browser automatically
+  -H, --show-hidden  Show hidden files and directories (names starting with '.')
+  -d, --max-depth <MAX_DEPTH>  Maximum directory depth for browsing (-1 for unlimited) [default: -1]
   -l, --log <LOG>    Access log output: "stdout", "off", or a file path [default: stdout]
   -h, --help         Print help
 ```
@@ -108,6 +113,15 @@ echofs --log /var/log/echofs.log
 
 # Disable access logging
 echofs --log off
+
+# Show hidden files (e.g., .env, .git)
+echofs --show-hidden
+
+# Limit browsing depth to one level of subdirectories
+echofs --max-depth 1
+
+# Only allow browsing root directory
+echofs -d 0
 ```
 
 When binding to `0.0.0.0`, the console shows all reachable addresses:
@@ -134,8 +148,8 @@ EchoFS provides a JSON API for directory listings. To get JSON instead of HTML f
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | List root directory (with `X-Requested-With: XMLHttpRequest` header) |
-| `GET` | `/{path}` | List subdirectory (with `X-Requested-With: XMLHttpRequest` header) |
+| `GET` `HEAD` | `/` | Root directory — HTML UI or JSON listing (with `X-Requested-With: XMLHttpRequest` header) |
+| `GET` `HEAD` | `/{path}` | Subdirectory or file — directories return HTML/JSON, files are streamed; hidden paths (`.`-prefixed) return 403 unless `--show-hidden` is enabled |
 
 Without the header, directory paths return the HTML UI. With the header, they return JSON.
 
@@ -176,13 +190,13 @@ echofs/
 │   ├── main.rs          Entry point: CLI parsing, LAN IP detection, server startup
 │   ├── cli.rs           Command-line argument definitions (clap derive)
 │   ├── server.rs        Axum router, CORS middleware, TCP listener
-│   ├── handlers.rs      Route handlers: HTML pages, JSON API, file streaming
+│   ├── handlers.rs      Route handlers: HTML pages, JSON API, file streaming, error dispatch
 │   ├── logging.rs       Access log middleware (stdout, file, or off)
 │   ├── range.rs         HTTP Range request parsing and 206 response builder
-│   ├── directory.rs     Directory traversal, path safety checks, entry collection
-│   ├── template.rs      Embedded HTML/CSS/JS single-page application
+│   ├── directory.rs     Async directory traversal, path safety, hidden file blocking
+│   ├── template.rs      Embedded HTML/CSS/JS single-page application and error pages
 │   ├── mime_utils.rs    MIME type detection and file icon mapping
-│   └── error.rs         Unified error type implementing IntoResponse
+│   └── error.rs         Unified error type with dual-mode responses (HTML/JSON)
 └── tests/
     └── integration_test.rs   Integration tests (router, API, file serving, security)
 ```
@@ -197,10 +211,10 @@ cargo test
 cargo test --verbose
 ```
 
-The project includes 83 automated tests:
+The project includes over 120 automated tests:
 
-- **Unit tests** (67) — embedded in each source module via `#[cfg(test)]`, covering range parsing, directory listing, MIME detection, error handling, logging, and template content
-- **Integration tests** (16) — in `tests/integration_test.rs`, testing the full Axum router via `tower::ServiceExt::oneshot()`: HTML serving, JSON API responses, file streaming with Range requests, path traversal security, and MIME types
+- **Unit tests** — embedded in each source module via `#[cfg(test)]`, covering range parsing, directory listing, MIME detection, error handling, logging, template content, hidden file blocking, directory depth limiting, and HTML/JSON error dispatch
+- **Integration tests** — in `tests/integration_test.rs`, testing the full Axum router via `tower::ServiceExt::oneshot()`: HTML serving, JSON API responses, file streaming with Range requests, path traversal security, hidden file access denial, directory depth enforcement, HEAD method support, error page format dispatch, and MIME types
 
 CI runs `cargo test` on Linux, macOS, and Windows before building release artifacts.
 

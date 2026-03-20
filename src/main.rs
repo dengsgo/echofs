@@ -98,5 +98,5 @@ async fn main() {
         let _ = open::that(&url);
     }
 
-    server::run(root, &addr, log_target).await;
+    server::run(root, &addr, log_target, args.show_hidden, args.max_depth).await;
 }

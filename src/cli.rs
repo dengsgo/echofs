@@ -20,6 +20,14 @@ pub struct Args {
     #[arg(short, long, default_value_t = false)]
     pub open: bool,
 
+    /// Show hidden files and directories (names starting with '.')
+    #[arg(short = 'H', long, default_value_t = false)]
+    pub show_hidden: bool,
+
+    /// Maximum directory depth for browsing (-1 for unlimited)
+    #[arg(short = 'd', long, default_value_t = -1)]
+    pub max_depth: i32,
+
     /// Access log output: "stdout" (default), "off" to disable, or a file path
     #[arg(short, long, default_value = "stdout")]
     pub log: String,

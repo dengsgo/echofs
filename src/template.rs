@@ -498,6 +498,7 @@ body {
       const data = await resp.json();
       currentEntries = data.entries;
       renderBreadcrumbs(data.breadcrumbs);
+      document.title = data.path === '/' ? 'EchoFS' : data.path.split('/').filter(Boolean).pop() + ' — EchoFS';
       sortAndRender();
     } catch (e) {
       content.innerHTML = '<div class="empty-state">Failed to load directory</div>';
@@ -734,14 +735,128 @@ body {
 </html>"##.to_string()
 }
 
+pub fn error_html(status_code: u16, title: &str, message: &str) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>{status_code} {title} — EchoFS</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M2 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z' stroke='%230071e3' stroke-width='1.8'/%3E%3Cpath d='M10 11a1.5 1.5 0 0 1 0 3' stroke='%230071e3' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M12.5 9.5a4.5 4.5 0 0 1 0 6' stroke='%230071e3' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M15 8a7 7 0 0 1 0 9' stroke='%230071e3' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root {{
+  --bg: #ffffff;
+  --text: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --border: #d2d2d7;
+  --accent: #0071e3;
+  --header-bg: rgba(251, 251, 253, 0.72);
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #1d1d1f;
+    --text: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --border: #424245;
+    --accent: #2997ff;
+    --header-bg: rgba(37, 37, 39, 0.72);
+  }}
+}}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}}
+.header {{
+  background: var(--header-bg);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+}}
+.logo {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+  text-decoration: none;
+}}
+.error-container {{
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 80px 24px;
+  text-align: center;
+}}
+.error-code {{
+  font-size: 72px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  line-height: 1;
+  margin-bottom: 8px;
+}}
+.error-title {{
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}}
+.error-message {{
+  font-size: 16px;
+  color: var(--text-secondary);
+  margin-bottom: 32px;
+}}
+.back-link {{
+  display: inline-block;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 16px;
+  padding: 10px 24px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  transition: all 0.15s;
+}}
+.back-link:hover {{
+  background: var(--accent);
+  color: #fff;
+}}
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/" class="logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M10 11a1.5 1.5 0 0 1 0 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M12.5 9.5a4.5 4.5 0 0 1 0 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M15 8a7 7 0 0 1 0 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>EchoFS</a>
+</div>
+<div class="error-container">
+  <div class="error-code">{status_code}</div>
+  <div class="error-title">{title}</div>
+  <div class="error-message">{message}</div>
+  <a href="/" class="back-link">Back to Home</a>
+</div>
+</body>
+</html>"##,
+        status_code = status_code,
+        title = html_escape(title),
+        message = html_escape(message),
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn not_empty() {
-        assert!(!index_html().is_empty());
-    }
 
     #[test]
     fn starts_with_doctype() {
@@ -756,5 +871,47 @@ mod tests {
     #[test]
     fn contains_xhr_header() {
         assert!(index_html().contains("X-Requested-With"));
+    }
+
+    #[test]
+    fn contains_dynamic_title_update() {
+        let html = index_html();
+        assert!(html.contains("document.title"));
+        assert!(html.contains("EchoFS"));
+    }
+
+    #[test]
+    fn error_html_contains_status_code() {
+        let html = error_html(404, "Not Found", "The page was not found");
+        assert!(html.contains("404"));
+        assert!(html.contains("Not Found"));
+        assert!(html.contains("The page was not found"));
+    }
+
+    #[test]
+    fn error_html_starts_with_doctype() {
+        let html = error_html(500, "Internal Error", "Something went wrong");
+        assert!(html.starts_with("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn error_html_contains_back_link() {
+        let html = error_html(403, "Forbidden", "Access denied");
+        assert!(html.contains("Back to Home"));
+        assert!(html.contains("href=\"/\""));
+    }
+
+    #[test]
+    fn error_html_escapes_xss() {
+        let html = error_html(400, "<script>alert(1)</script>", "test &\"quotes\"");
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&amp;&quot;quotes&quot;"));
+    }
+
+    #[test]
+    fn error_html_contains_echofs() {
+        let html = error_html(404, "Not Found", "msg");
+        assert!(html.contains("EchoFS"));
     }
 }

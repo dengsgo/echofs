@@ -21,7 +21,10 @@
 - **响应式布局** — 移动端卡片布局、桌面端表格布局，适配 iPad 和手机
 - **毛玻璃效果** — 顶部导航栏 `backdrop-filter` 磨砂玻璃效果
 - **局域网地址** — 绑定 `0.0.0.0` 时自动列出所有可访问的局域网 IP
-- **安全防护** — 通过 `canonicalize` + `starts_with` 校验防止路径遍历攻击
+- **安全防护** — 通过 `canonicalize` + `starts_with` 校验防止路径遍历攻击；隐藏文件/目录（`.env`、`.git` 等）默认在目录列表和直接 URL 访问中均被拦截（可通过 `--show-hidden` 允许访问）
+- **目录深度限制** — 通过 `--max-depth` 限制用户浏览目录的深度（如 `--max-depth 1` 只允许一级子目录，`0` 只允许根目录）
+- **HTML 错误页面** — 浏览器访问返回风格化的错误页面（404、403 等），API 请求返回 JSON 错误
+- **异步 I/O** — 所有文件系统操作在 `spawn_blocking` 中运行，避免阻塞异步运行时
 - **访问日志** — 请求日志输出到控制台（默认）、文件，或完全关闭
 
 ## 快速开始
@@ -87,6 +90,8 @@ Options:
   -p, --port <PORT>  监听端口 [默认: 8080]
   -b, --bind <BIND>  绑定地址 [默认: 0.0.0.0]
   -o, --open         自动打开浏览器
+  -H, --show-hidden  显示隐藏文件和目录（以 '.' 开头的文件/目录）
+  -d, --max-depth <MAX_DEPTH>  目录浏览最大深度（-1 为不限制）[默认: -1]
   -l, --log <LOG>    访问日志输出："stdout"、"off" 或文件路径 [默认: stdout]
   -h, --help         打印帮助信息
 ```
@@ -108,6 +113,15 @@ echofs --log /var/log/echofs.log
 
 # 关闭访问日志
 echofs --log off
+
+# 显示隐藏文件（如 .env、.git）
+echofs --show-hidden
+
+# 限制目录浏览深度为一级子目录
+echofs --max-depth 1
+
+# 只允许浏览根目录
+echofs -d 0
 ```
 
 绑定 `0.0.0.0` 时，控制台输出所有可访问地址：
@@ -134,8 +148,8 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求任意目录路径时添
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/` | 列出根目录（需添加 `X-Requested-With: XMLHttpRequest` 请求头） |
-| `GET` | `/{path}` | 列出子目录（需添加 `X-Requested-With: XMLHttpRequest` 请求头） |
+| `GET` `HEAD` | `/` | 根目录 — 返回 HTML 页面或 JSON 列表（需添加 `X-Requested-With: XMLHttpRequest` 请求头） |
+| `GET` `HEAD` | `/{path}` | 子目录或文件 — 目录返回 HTML/JSON，文件流式传输；隐藏路径（`.` 开头）默认返回 403，可通过 `--show-hidden` 允许访问 |
 
 不带该请求头时，目录路径返回 HTML 页面；带上该请求头时返回 JSON 数据。
 
@@ -176,13 +190,13 @@ echofs/
 │   ├── main.rs          入口：CLI 解析、局域网 IP 检测、启动服务器
 │   ├── cli.rs           命令行参数定义（clap derive）
 │   ├── server.rs        Axum 路由、CORS 中间件、TCP 监听
-│   ├── handlers.rs      路由处理器：HTML 页面、JSON API、文件流式传输
+│   ├── handlers.rs      路由处理器：HTML 页面、JSON API、文件流式传输、错误分发
 │   ├── logging.rs       访问日志中间件（stdout / 文件 / 关闭）
 │   ├── range.rs         HTTP Range 请求解析与 206 响应构建
-│   ├── directory.rs     目录遍历、路径安全校验、文件条目收集
-│   ├── template.rs      内嵌 HTML/CSS/JS 单页应用
+│   ├── directory.rs     异步目录遍历、路径安全校验、隐藏文件拦截
+│   ├── template.rs      内嵌 HTML/CSS/JS 单页应用及错误页面
 │   ├── mime_utils.rs    MIME 类型检测与文件图标映射
-│   └── error.rs         统一错误类型，实现 IntoResponse
+│   └── error.rs         统一错误类型，支持双模式响应（HTML/JSON）
 └── tests/
     └── integration_test.rs   集成测试（路由、API、文件服务、安全性）
 ```
@@ -197,10 +211,10 @@ cargo test
 cargo test --verbose
 ```
 
-项目包含 83 个自动化测试：
+项目包含超过 120 个自动化测试：
 
-- **单元测试**（67 个）— 内嵌在各源码模块的 `#[cfg(test)]` 中，覆盖 Range 解析、目录列表、MIME 检测、错误处理、日志、模板内容
-- **集成测试**（16 个）— 位于 `tests/integration_test.rs`，通过 `tower::ServiceExt::oneshot()` 测试完整的 Axum 路由：HTML 服务、JSON API 响应、Range 文件流、路径遍历安全、MIME 类型
+- **单元测试** — 内嵌在各源码模块的 `#[cfg(test)]` 中，覆盖 Range 解析、目录列表、MIME 检测、错误处理、日志、模板内容、隐藏文件拦截、目录深度限制、HTML/JSON 错误分发
+- **集成测试** — 位于 `tests/integration_test.rs`，通过 `tower::ServiceExt::oneshot()` 测试完整的 Axum 路由：HTML 服务、JSON API 响应、Range 文件流、路径遍历安全、隐藏文件访问拒绝、目录深度限制、HEAD 方法支持、错误页面格式分发、MIME 类型
 
 CI 在 Linux、macOS、Windows 三平台上运行 `cargo test`，通过后才构建发布产物。
 

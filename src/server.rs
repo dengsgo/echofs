@@ -8,8 +8,8 @@ use tower_http::cors::CorsLayer;
 use crate::handlers::{self, AppState};
 use crate::logging::{self, LogTarget};
 
-pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget) {
-    let state = Arc::new(AppState { root });
+pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget, show_hidden: bool, max_depth: i32) {
+    let state = Arc::new(AppState { root, show_hidden, max_depth });
 
     let app = Router::new()
         .route("/", get(handlers::serve_index))

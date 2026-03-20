@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Response, header};
+use axum::http::{HeaderMap, HeaderValue, Response, header};
 use axum::response::{Html, IntoResponse};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +13,8 @@ use crate::template;
 
 pub struct AppState {
     pub root: PathBuf,
+    pub show_hidden: bool,
+    pub max_depth: i32,
 }
 
 fn is_ajax(headers: &HeaderMap) -> bool {
@@ -30,18 +32,18 @@ pub async fn serve_index(
     let full_path = &state.root;
     if full_path.is_dir() {
         let mut resp = if is_ajax(&headers) {
-            match directory::list_directory(&state.root, "") {
+            match directory::list_directory(&state.root, "", state.show_hidden, state.max_depth).await {
                 Ok(listing) => axum::Json(listing).into_response(),
-                Err(e) => e.into_response(),
+                Err(e) => e.into_response_for(&headers),
             }
         } else {
             Html(template::index_html()).into_response()
         };
         resp.headers_mut()
-            .insert(header::VARY, "X-Requested-With".parse().unwrap());
+            .insert(header::VARY, HeaderValue::from_static("X-Requested-With"));
         resp
     } else {
-        AppError::NotFound("Root is not a directory".into()).into_response()
+        AppError::NotFound("Root is not a directory".into()).into_response_for(&headers)
     }
 }
 
@@ -54,22 +56,22 @@ pub async fn serve_path(
         .decode_utf8_lossy()
         .to_string();
 
-    let resolved = match directory::safe_resolve(&state.root, &rel_path) {
+    let resolved = match directory::safe_resolve(&state.root, &rel_path, state.show_hidden, state.max_depth).await {
         Ok(p) => p,
-        Err(e) => return e.into_response(),
+        Err(e) => return e.into_response_for(&headers),
     };
 
     if resolved.is_dir() {
         let mut resp = if is_ajax(&headers) {
-            match directory::list_directory(&state.root, &rel_path) {
+            match directory::list_directory(&state.root, &rel_path, state.show_hidden, state.max_depth).await {
                 Ok(listing) => axum::Json(listing).into_response(),
-                Err(e) => e.into_response(),
+                Err(e) => e.into_response_for(&headers),
             }
         } else {
             Html(template::index_html()).into_response()
         };
         resp.headers_mut()
-            .insert(header::VARY, "X-Requested-With".parse().unwrap());
+            .insert(header::VARY, HeaderValue::from_static("X-Requested-With"));
         resp
     } else if resolved.is_file() {
         let mime = mime_utils::detect_mime(&resolved);
@@ -80,9 +82,9 @@ pub async fn serve_path(
         };
         match range::build_range_response(&resolved, &headers, &content_type).await {
             Ok(resp) => resp,
-            Err(e) => AppError::from(e).into_response(),
+            Err(e) => AppError::from(e).into_response_for(&headers),
         }
     } else {
-        AppError::NotFound("Path not found".into()).into_response()
+        AppError::NotFound("Path not found".into()).into_response_for(&headers)
     }
 }
