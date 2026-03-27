@@ -15,6 +15,8 @@ pub struct AppState {
     pub root: PathBuf,
     pub show_hidden: bool,
     pub max_depth: i32,
+    pub speed_limit: Option<u64>,
+    pub webdav: bool,
 }
 
 fn is_ajax(headers: &HeaderMap) -> bool {
@@ -80,7 +82,7 @@ pub async fn serve_path(
         } else {
             mime.to_string()
         };
-        match range::build_range_response(&resolved, &headers, &content_type).await {
+        match range::build_range_response(&resolved, &headers, &content_type, state.speed_limit).await {
             Ok(resp) => resp,
             Err(e) => AppError::from(e).into_response_for(&headers),
         }

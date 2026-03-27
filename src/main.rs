@@ -92,11 +92,31 @@ async fn main() {
     }
 
     let log_target = logging::LogTarget::from_arg(&args.log);
+    let speed_limit = args.speed_limit_bytes();
+
+    if let Some(limit) = speed_limit {
+        let display = if limit >= 1024 * 1024 * 1024 {
+            format!("{:.1} GB/s", limit as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else if limit >= 1024 * 1024 {
+            format!("{:.1} MB/s", limit as f64 / (1024.0 * 1024.0))
+        } else if limit >= 1024 {
+            format!("{:.1} KB/s", limit as f64 / 1024.0)
+        } else {
+            format!("{} B/s", limit)
+        };
+        println!("Speed limit: {} per request", display);
+    }
+
+    let webdav = !args.no_webdav;
+
+    if args.no_webdav {
+        println!("WebDAV: disabled");
+    }
 
     if args.open {
         let url = format!("http://127.0.0.1:{}", args.port);
         let _ = open::that(&url);
     }
 
-    server::run(root, &addr, log_target, args.show_hidden, args.max_depth).await;
+    server::run(root, &addr, log_target, args.show_hidden, args.max_depth, speed_limit, webdav).await;
 }

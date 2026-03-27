@@ -1,6 +1,6 @@
 [package]
 name = "echofs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A Rust file server with browser-based directory browsing and media preview"
 license = "Apache-2.0"

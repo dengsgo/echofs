@@ -2,8 +2,20 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, Response, StatusCode};
 use std::path::Path;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+
+use crate::throttle::ThrottledRead;
+
+fn stream_body<R: AsyncRead + Send + Unpin + 'static>(reader: R, speed_limit: Option<u64>) -> Body {
+    match speed_limit {
+        Some(limit) => {
+            let throttled = ThrottledRead::new(reader, limit);
+            Body::from_stream(ReaderStream::new(throttled))
+        }
+        None => Body::from_stream(ReaderStream::new(reader)),
+    }
+}
 
 pub struct RangeSpec {
     pub start: u64,
@@ -51,6 +63,7 @@ pub async fn build_range_response(
     path: &Path,
     headers: &HeaderMap,
     content_type: &str,
+    speed_limit: Option<u64>,
 ) -> Result<Response<Body>, std::io::Error> {
     let metadata = tokio::fs::metadata(path).await?;
     let file_size = metadata.len();
@@ -66,8 +79,7 @@ pub async fn build_range_response(
             let mut file = File::open(path).await?;
             file.seek(std::io::SeekFrom::Start(range.start)).await?;
             let limited = file.take(content_length);
-            let stream = ReaderStream::new(limited);
-            let body = Body::from_stream(stream);
+            let body = stream_body(limited, speed_limit);
 
             let response = Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -94,8 +106,7 @@ pub async fn build_range_response(
     } else {
         // No range header - full file
         let file = File::open(path).await?;
-        let stream = ReaderStream::new(file);
-        let body = Body::from_stream(stream);
+        let body = stream_body(file, speed_limit);
 
         let response = Response::builder()
             .status(StatusCode::OK)

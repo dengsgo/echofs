@@ -16,7 +16,7 @@ fn test_app(root: std::path::PathBuf) -> Router {
 
 /// Build a test router with configurable options.
 fn test_app_with_options(root: std::path::PathBuf, show_hidden: bool, max_depth: i32) -> Router {
-    let state = Arc::new(AppState { root, show_hidden, max_depth });
+    let state = Arc::new(AppState { root, show_hidden, max_depth, speed_limit: None, webdav: false });
     Router::new()
         .route("/", get(handlers::serve_index))
         .route("/{*path}", get(handlers::serve_path))
@@ -956,4 +956,411 @@ async fn max_depth_listing_hides_grandchild_dirs() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["name"], "file.txt");
     assert!(!entries[0]["is_dir"].as_bool().unwrap());
+}
+
+// ─── WebDAV Integration Tests ───
+
+/// Build a test router with WebDAV enabled.
+fn test_app_webdav(root: std::path::PathBuf) -> Router {
+    test_app_webdav_with_options(root, false, -1)
+}
+
+fn test_app_webdav_with_options(root: std::path::PathBuf, show_hidden: bool, max_depth: i32) -> Router {
+    let state = Arc::new(AppState { root, show_hidden, max_depth, speed_limit: None, webdav: true });
+    Router::new()
+        .route("/", get(handlers::serve_index))
+        .route("/{*path}", get(handlers::serve_path))
+        .route("/", axum::routing::any(echofs::webdav::handle_webdav_root))
+        .route("/{*path}", axum::routing::any(echofs::webdav::handle_webdav_path))
+        .with_state(state)
+}
+
+#[tokio::test]
+async fn webdav_options_returns_dav_header() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("DAV").unwrap(), "1, 2");
+    assert!(resp.headers().get("Allow").unwrap().to_str().unwrap().contains("PROPFIND"));
+    assert!(resp.headers().get("Allow").unwrap().to_str().unwrap().contains("LOCK"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_root_depth_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("file.txt"), "hello").unwrap();
+    fs::create_dir(root.join("subdir")).unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("<D:multistatus"));
+    assert!(body.contains("<D:collection/>"));
+    // Depth 0 should NOT include children
+    assert!(!body.contains("file.txt"));
+    assert!(!body.contains("subdir"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_root_depth_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("file.txt"), "hello").unwrap();
+    fs::create_dir(root.join("subdir")).unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/")
+                .header("Depth", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("<D:multistatus"));
+    // Should include both the root collection and children
+    assert!(body.contains("<D:collection/>"));
+    assert!(body.contains("file.txt"));
+    assert!(body.contains("subdir"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("readme.txt"), "content here").unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/readme.txt")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("<D:resourcetype/>"));
+    assert!(body.contains("<D:getcontentlength>12</D:getcontentlength>"));
+    assert!(body.contains("text/plain"));
+    assert!(body.contains("readme.txt"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_nonexistent_returns_404() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/nonexistent")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn webdav_propfind_hidden_file_returns_403() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join(".secret"), "hidden").unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/.secret")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn webdav_propfind_hidden_file_allowed_with_show_hidden() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join(".secret"), "hidden").unwrap();
+
+    let app = test_app_webdav_with_options(root, true, -1);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/.secret")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains(".secret"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_subdirectory_depth_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
+    fs::write(root.join("docs/a.txt"), "aaa").unwrap();
+    fs::write(root.join("docs/b.txt"), "bbb").unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/docs")
+                .header("Depth", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("a.txt"));
+    assert!(body.contains("b.txt"));
+    assert!(body.contains("<D:collection/>"));
+}
+
+#[tokio::test]
+async fn webdav_propfind_without_webdav_flag_returns_405() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // Use the non-webdav test app
+    let app = test_app(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn webdav_options_on_subpath() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::create_dir(root.join("folder")).unwrap();
+
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/folder")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("DAV").unwrap(), "1, 2");
+}
+
+#[tokio::test]
+async fn webdav_lock_returns_lock_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("LOCK")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get("Lock-Token").is_some());
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("<D:lockdiscovery>"));
+    assert!(body.contains("<D:locktoken>"));
+}
+
+#[tokio::test]
+async fn webdav_unlock_returns_no_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("UNLOCK")
+                .uri("/")
+                .header("Lock-Token", "<opaquelocktoken:test>")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn webdav_put_returns_forbidden() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/newfile.txt")
+                .body(Body::from("data"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn webdav_delete_returns_forbidden() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("file.txt"), "data").unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/file.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn webdav_propfind_includes_supportedlock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("file.txt"), "hello").unwrap();
+    let app = test_app_webdav(root);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/")
+                .header("Depth", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+    let body = body_string(resp.into_body()).await;
+    assert!(body.contains("<D:supportedlock>"));
+    assert!(body.contains("<D:getetag>"));
+    assert!(body.contains("<D:creationdate>") || body.contains("<D:getlastmodified>"));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("a/b")).unwrap();
+    fs::write(root.join("a/b/deep.txt"), "data").unwrap();
+
+    // max_depth = 0 means root only
+    let app = test_app_webdav_with_options(root, false, 0);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PROPFIND")
+                .uri("/a")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Depth 1 dir "a" should be rejected by max_depth 0
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

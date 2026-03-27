@@ -5,13 +5,13 @@
 
 [中文文档](README_cn.md)
 
-A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. 
+A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. Supports read-only WebDAV for mounting as a network drive in file managers.
 
 This is a native AI project, entirely written by AI.
 
 ## Features
 
-- **Single Binary** — Compiles to one ~1.3 MB executable, no runtime dependencies
+- **Single Binary** — Compiles to one ~1.4 MB executable, no runtime dependencies
 - **Directory Browsing** — Modern web UI with breadcrumb navigation and multi-level directory support
 - **Media Preview** — Play video/audio and view images directly in the browser (HTML5)
 - **Shareable Links** — Copy file links that work in external players like VLC and mpv
@@ -23,6 +23,8 @@ This is a native AI project, entirely written by AI.
 - **LAN Access Info** — When binding to `0.0.0.0`, displays all available local network addresses
 - **Security** — Path traversal protection via `canonicalize` + `starts_with`; hidden files/directories (`.env`, `.git`, etc.) are blocked from both listings and direct URL access by default (use `--show-hidden` to allow)
 - **Directory Depth Limiting** — Restrict how deep users can browse with `--max-depth` (e.g., `--max-depth 1` for one level of subdirectories, `0` for root only)
+- **Per-Request Speed Limiting** — Throttle download speed per request with `--speed-limit` (e.g., `1m` for 1 MB/s, `500k` for 500 KB/s); uses token-bucket algorithm with async sleep, zero overhead when disabled
+- **WebDAV (Read-Only)** — Enabled by default; mount the served directory as a network drive in macOS Finder, Windows Explorer, or Linux file managers via standard WebDAV protocol (PROPFIND/OPTIONS); respects all security settings (hidden files, path traversal, depth limits); disable with `--no-webdav`
 - **HTML Error Pages** — Styled error pages for browser requests (404, 403, etc.), JSON errors for API clients
 - **Async I/O** — All filesystem operations run in `spawn_blocking` to avoid blocking the async runtime
 - **Access Logging** — Request logs to stdout (default), a file, or disabled entirely
@@ -92,6 +94,8 @@ Options:
   -o, --open         Open browser automatically
   -H, --show-hidden  Show hidden files and directories (names starting with '.')
   -d, --max-depth <MAX_DEPTH>  Maximum directory depth for browsing (-1 for unlimited) [default: -1]
+  -s, --speed-limit <SPEED_LIMIT>  Speed limit per request, e.g. 500k, 1m, 10m [default: unlimited]
+      --no-webdav    Disable read-only WebDAV access [default: enabled]
   -l, --log <LOG>    Access log output: "stdout", "off", or a file path [default: stdout]
   -h, --help         Print help
 ```
@@ -122,6 +126,34 @@ echofs --max-depth 1
 
 # Only allow browsing root directory
 echofs -d 0
+
+# Limit download speed to 1MB/s per request
+echofs --speed-limit 1m
+
+# Limit download speed to 500KB/s per request
+echofs -s 500k
+
+# Disable WebDAV access
+echofs --no-webdav
+```
+
+#### WebDAV Access
+
+WebDAV is enabled by default. File managers can mount the served directory as a network drive:
+
+```bash
+# macOS Finder: Go → Connect to Server (⌘K)
+# Enter: http://localhost:8080
+
+# Windows Explorer: Map Network Drive
+# Enter: \\localhost@8080\
+
+# Linux (GNOME Files / Nautilus): Connect to Server
+# Enter: dav://localhost:8080
+
+# Command line (curl)
+curl -X PROPFIND http://localhost:8080/ -H "Depth: 1"
+curl -X OPTIONS http://localhost:8080/
 ```
 
 When binding to `0.0.0.0`, the console shows all reachable addresses:
@@ -150,6 +182,8 @@ EchoFS provides a JSON API for directory listings. To get JSON instead of HTML f
 |--------|------|-------------|
 | `GET` `HEAD` | `/` | Root directory — HTML UI or JSON listing (with `X-Requested-With: XMLHttpRequest` header) |
 | `GET` `HEAD` | `/{path}` | Subdirectory or file — directories return HTML/JSON, files are streamed; hidden paths (`.`-prefixed) return 403 unless `--show-hidden` is enabled |
+| `PROPFIND` | `/` `/{path}` | WebDAV directory/file metadata — returns `207 Multi-Status` XML; supports `Depth: 0` (self) and `Depth: 1` (self + children); enabled by default, disabled with `--no-webdav` |
+| `OPTIONS` | `/` `/{path}` | WebDAV capability discovery — returns `DAV: 1` header and allowed methods |
 
 Without the header, directory paths return the HTML UI. With the header, they return JSON.
 
@@ -196,7 +230,9 @@ echofs/
 │   ├── directory.rs     Async directory traversal, path safety, hidden file blocking
 │   ├── template.rs      Embedded HTML/CSS/JS single-page application and error pages
 │   ├── mime_utils.rs    MIME type detection and file icon mapping
-│   └── error.rs         Unified error type with dual-mode responses (HTML/JSON)
+│   ├── error.rs         Unified error type with dual-mode responses (HTML/JSON)
+│   ├── throttle.rs      Per-request speed limiting (token-bucket ThrottledRead wrapper)
+│   └── webdav.rs        Read-only WebDAV: PROPFIND/OPTIONS handlers, XML response generation
 └── tests/
     └── integration_test.rs   Integration tests (router, API, file serving, security)
 ```
@@ -211,10 +247,10 @@ cargo test
 cargo test --verbose
 ```
 
-The project includes over 120 automated tests:
+The project includes over 150 automated tests:
 
-- **Unit tests** — embedded in each source module via `#[cfg(test)]`, covering range parsing, directory listing, MIME detection, error handling, logging, template content, hidden file blocking, directory depth limiting, and HTML/JSON error dispatch
-- **Integration tests** — in `tests/integration_test.rs`, testing the full Axum router via `tower::ServiceExt::oneshot()`: HTML serving, JSON API responses, file streaming with Range requests, path traversal security, hidden file access denial, directory depth enforcement, HEAD method support, error page format dispatch, and MIME types
+- **Unit tests** — embedded in each source module via `#[cfg(test)]`, covering range parsing, directory listing, MIME detection, error handling, logging, template content, hidden file blocking, directory depth limiting, speed limit parsing, throttled read throughput, HTML/JSON error dispatch, WebDAV XML generation, Depth header parsing, and XML escaping
+- **Integration tests** — in `tests/integration_test.rs`, testing the full Axum router via `tower::ServiceExt::oneshot()`: HTML serving, JSON API responses, file streaming with Range requests, path traversal security, hidden file access denial, directory depth enforcement, HEAD method support, error page format dispatch, MIME types, and WebDAV (PROPFIND/OPTIONS responses, Depth 0/1 behavior, hidden file blocking, max-depth enforcement, disabled-flag behavior)
 
 CI runs `cargo test` on Linux, macOS, and Windows before building release artifacts.
 

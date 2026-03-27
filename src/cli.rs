@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
+use crate::throttle;
 
 #[derive(Parser, Debug)]
 #[command(name = "echofs", about = "A Rust file server with directory browsing and media preview")]
@@ -31,6 +32,14 @@ pub struct Args {
     /// Access log output: "stdout" (default), "off" to disable, or a file path
     #[arg(short, long, default_value = "stdout")]
     pub log: String,
+
+    /// Speed limit per request, e.g. 500k, 1m, 10m (default: unlimited)
+    #[arg(short = 's', long)]
+    pub speed_limit: Option<String>,
+
+    /// Disable read-only WebDAV access (PROPFIND support for file managers)
+    #[arg(long, default_value_t = false)]
+    pub no_webdav: bool,
 }
 
 impl Args {
@@ -44,5 +53,14 @@ impl Args {
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.bind, self.port)
+    }
+
+    pub fn speed_limit_bytes(&self) -> Option<u64> {
+        self.speed_limit.as_ref().map(|s| {
+            throttle::parse_speed(s).unwrap_or_else(|| {
+                eprintln!("Error: invalid speed limit '{}' (examples: 500k, 1m, 10m)", s);
+                std::process::exit(1);
+            })
+        })
     }
 }
