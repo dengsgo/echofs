@@ -5,29 +5,25 @@
 
 [English](README.md)
 
-一个轻量级的 Rust 文件服务器，编译为单个可执行文件。通过浏览器浏览目录、预览媒体文件、复制分享链接。支持只读 WebDAV，可在文件管理器中挂载为网络驱动器。
+一个轻量级的 Rust 文件服务器，编译为单个可执行文件。通过浏览器浏览目录、预览媒体文件、复制分享链接。支持完整读写 WebDAV，可在文件管理器中挂载为网络驱动器，支持可选的用户名密码认证。
 
 这是一个原生AI项目，完全由AI编写。
 
 ## 功能特性
 
 - **单文件部署** — 编译产物仅 ~1.4 MB，无运行时依赖
-- **目录浏览** — 现代化 Web UI，支持面包屑导航和多级目录
-- **媒体预览** — 视频、音频、图片在浏览器内直接播放预览（HTML5）
+- **目录浏览** — 现代化 Web UI，支持面包屑导航
+- **媒体预览** — 视频、音频、图片在浏览器内直接播放预览
 - **链接分享** — 一键复制文件链接，可在 VLC、mpv 等外部播放器中使用
-- **Range 请求** — 完整支持 HTTP `206 Partial Content`，视频可拖动进度条，支持断点续传
-- **文件排序** — 按名称、大小、创建时间、修改时间升序/降序排列
-- **主题切换** — 亮色/暗色一键切换，通过 `localStorage` 持久化
-- **响应式布局** — 移动端卡片布局、桌面端表格布局，适配 iPad 和手机
-- **毛玻璃效果** — 顶部导航栏 `backdrop-filter` 磨砂玻璃效果
-- **局域网地址** — 绑定 `0.0.0.0` 时自动列出所有可访问的局域网 IP
-- **安全防护** — 通过 `canonicalize` + `starts_with` 校验防止路径遍历攻击；隐藏文件/目录（`.env`、`.git` 等）默认在目录列表和直接 URL 访问中均被拦截（可通过 `--show-hidden` 允许访问）
-- **目录深度限制** — 通过 `--max-depth` 限制用户浏览目录的深度（如 `--max-depth 1` 只允许一级子目录，`0` 只允许根目录）
-- **单请求限速** — 通过 `--speed-limit` 限制每个下载请求的速度（如 `1m` 为 1 MB/s，`500k` 为 500 KB/s）；基于令牌桶算法异步等待，未启用时零开销
-- **WebDAV（只读）** — 默认启用；支持 macOS Finder、Windows 资源管理器、Linux 文件管理器通过标准 WebDAV 协议（PROPFIND/OPTIONS）将目录挂载为网络驱动器；遵循所有安全设置（隐藏文件、路径遍历、深度限制）；可通过 `--no-webdav` 禁用
-- **HTML 错误页面** — 浏览器访问返回风格化的错误页面（404、403 等），API 请求返回 JSON 错误
-- **异步 I/O** — 所有文件系统操作在 `spawn_blocking` 中运行，避免阻塞异步运行时
-- **访问日志** — 请求日志输出到控制台（默认）、文件，或完全关闭
+- **Range 请求** — 视频拖动进度条，支持断点续传
+- **文件排序** — 按名称、大小、创建/修改时间排列
+- **主题切换** — 亮色/暗色一键切换，自动持久化
+- **响应式布局** — 移动端卡片布局、桌面端表格布局
+- **安全防护** — 路径遍历防护；隐藏文件（`.env`、`.git` 等）默认拦截
+- **目录深度限制** — 通过 `--max-depth` 限制浏览深度
+- **单请求限速** — 通过 `--speed-limit` 限制下载速度
+- **WebDAV（读写）** — 支持 Finder / 资源管理器 / Nautilus 挂载为网络驱动器；支持上传、删除、复制、移动、创建目录；可通过 `--webdav-user` / `--webdav-pass` 设置认证；可通过 `--no-webdav` 禁用
+- **访问日志** — 输出到控制台、文件，或完全关闭
 
 ## 快速开始
 
@@ -95,7 +91,9 @@ Options:
   -H, --show-hidden  显示隐藏文件和目录（以 '.' 开头的文件/目录）
   -d, --max-depth <MAX_DEPTH>  目录浏览最大深度（-1 为不限制）[默认: -1]
   -s, --speed-limit <SPEED_LIMIT>  每个请求的速度限制，如 500k、1m、10m [默认: 不限制]
-      --no-webdav    禁用只读 WebDAV 访问 [默认: 启用]
+      --no-webdav    禁用 WebDAV 访问 [默认: 启用]
+      --webdav-user <WEBDAV_USER>  WebDAV 用户名（设置后所有 WebDAV 操作需认证；不影响网页访问）
+      --webdav-pass <WEBDAV_PASS>  WebDAV 密码（与 --webdav-user 配合使用）
   -l, --log <LOG>    访问日志输出："stdout"、"off" 或文件路径 [默认: stdout]
   -h, --help         打印帮助信息
 ```
@@ -107,87 +105,68 @@ Options:
 echofs -r ~/Downloads -p 3000
 
 # 仅绑定本机（不允许局域网访问）
-echofs -b 127.0.0.1 -p 8080
-
-# 启动并自动打开浏览器
-echofs -r /media/videos --open
-
-# 将访问日志写入文件
-echofs --log /var/log/echofs.log
-
-# 关闭访问日志
-echofs --log off
+echofs -b 127.0.0.1
 
 # 显示隐藏文件（如 .env、.git）
 echofs --show-hidden
 
-# 限制目录浏览深度为一级子目录
-echofs --max-depth 1
-
 # 只允许浏览根目录
 echofs -d 0
 
-# 限制每个请求的下载速度为 1MB/s
-echofs --speed-limit 1m
+# 限制下载速度为 1MB/s
+echofs -s 1m
 
-# 限制每个请求的下载速度为 500KB/s
-echofs -s 500k
+# 日志写入文件 / 关闭日志
+echofs --log /var/log/echofs.log
+echofs --log off
 
-# 禁用 WebDAV 访问
+# 禁用 WebDAV
 echofs --no-webdav
+
+# 设置 WebDAV 认证（不影响网页浏览）
+echofs --webdav-user admin --webdav-pass secret
 ```
 
-#### WebDAV 访问
+#### WebDAV
 
-WebDAV 默认启用，文件管理器可将服务目录挂载为网络驱动器：
+WebDAV 默认启用，支持完整的读写操作。文件管理器可将服务目录挂载为网络驱动器：
 
-```bash
-# macOS Finder：前往 → 连接服务器（⌘K）
-# 输入：http://localhost:8080
+- **macOS Finder**：前往 → 连接服务器（⌘K）→ `http://localhost:8080`
+- **Windows 资源管理器**：映射网络驱动器 → `\\localhost@8080\`
+- **Linux Nautilus**：连接到服务器 → `dav://localhost:8080`
 
-# Windows 资源管理器：映射网络驱动器
-# 输入：\\localhost@8080\
+设置 `--webdav-user` 和 `--webdav-pass` 后，所有 WebDAV 操作（浏览、上传、删除等）都需要 Basic Auth 认证。**网页浏览不受影响** — Web UI 始终保持开放。
 
-# Linux（GNOME 文件管理器 / Nautilus）：连接到服务器
-# 输入：dav://localhost:8080
+支持的 WebDAV 方法：`PROPFIND`、`OPTIONS`、`LOCK`、`UNLOCK`、`PUT`、`DELETE`、`MKCOL`、`COPY`、`MOVE`、`PROPPATCH`。
 
-# 命令行测试（curl）
-curl -X PROPFIND http://localhost:8080/ -H "Depth: 1"
-curl -X OPTIONS http://localhost:8080/
-```
-
-绑定 `0.0.0.0` 时，控制台输出所有可访问地址：
-
-```
-EchoFS serving /home/user/files on http://0.0.0.0:8080
-Available on:
-  http://127.0.0.1:8080
-  http://192.168.1.42:8080
-Listening on 0.0.0.0:8080
-```
-
-访问日志格式（默认开启）：
-
-```
-[2025-01-15 10:30:00] 192.168.1.5 GET P / 200 0.8ms
-[2025-01-15 10:30:00] 192.168.1.5 GET A / 200 0.5ms
-[2025-01-15 10:30:01] 192.168.1.5 GET P /photos/sunset.jpg 206 1.2ms
-```
+绑定 `0.0.0.0` 时，控制台会显示所有可访问的局域网地址。
 
 ## API 接口
 
-EchoFS 提供 JSON 格式的目录列表 API。在请求任意目录路径时添加 `X-Requested-With: XMLHttpRequest` 请求头即可获取 JSON 响应：
+EchoFS 提供 JSON 格式的目录列表 API。在请求中添加 `X-Requested-With: XMLHttpRequest` 头即可获取 JSON：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` `HEAD` | `/` | 根目录 — 返回 HTML 页面或 JSON 列表（需添加 `X-Requested-With: XMLHttpRequest` 请求头） |
-| `GET` `HEAD` | `/{path}` | 子目录或文件 — 目录返回 HTML/JSON，文件流式传输；隐藏路径（`.` 开头）默认返回 403，可通过 `--show-hidden` 允许访问 |
-| `PROPFIND` | `/` `/{path}` | WebDAV 目录/文件元数据 — 返回 `207 Multi-Status` XML；支持 `Depth: 0`（仅自身）和 `Depth: 1`（自身 + 子项）；默认启用，可通过 `--no-webdav` 禁用 |
-| `OPTIONS` | `/` `/{path}` | WebDAV 能力发现 — 返回 `DAV: 1` 头和允许的方法列表 |
+| `GET` `HEAD` | `/` `/{path}` | 目录 → HTML 或 JSON（带 XHR 头）；文件 → 流式传输 |
+| `PROPFIND` | `/` `/{path}` | WebDAV 元数据 — `207 Multi-Status` XML（`Depth: 0` 或 `1`） |
+| `OPTIONS` | `/` `/{path}` | WebDAV 能力发现 |
+| `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content） |
+| `DELETE` | `/{path}` | 删除文件或目录（204 No Content） |
+| `MKCOL` | `/{path}` | 创建目录（201 Created） |
+| `COPY` | `/{path}` | 复制文件/目录（需 `Destination` 头） |
+| `MOVE` | `/{path}` | 移动/重命名文件/目录（需 `Destination` 头） |
+| `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
+| `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
+| `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content） |
+| `DELETE` | `/{path}` | 删除文件或目录（204 No Content） |
+| `MKCOL` | `/{path}` | 创建目录（201 Created） |
+| `COPY` | `/{path}` | 复制文件/目录（需 `Destination` 头） |
+| `MOVE` | `/{path}` | 移动/重命名文件/目录（需 `Destination` 头） |
+| `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
+| `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
 
-不带该请求头时，目录路径返回 HTML 页面；带上该请求头时返回 JSON 数据。
-
-响应示例：
+<details>
+<summary>JSON 响应示例</summary>
 
 ```json
 {
@@ -213,6 +192,7 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求任意目录路径时添
   ]
 }
 ```
+</details>
 
 ## 项目结构
 
@@ -232,7 +212,7 @@ echofs/
 │   ├── mime_utils.rs    MIME 类型检测与文件图标映射
 │   ├── error.rs         统一错误类型，支持双模式响应（HTML/JSON）
 │   ├── throttle.rs      单请求限速（令牌桶 ThrottledRead 包装器）
-│   └── webdav.rs        只读 WebDAV：PROPFIND/OPTIONS 处理器、XML 响应生成
+│   └── webdav.rs        WebDAV：PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH 处理器、认证、XML 响应生成
 └── tests/
     └── integration_test.rs   集成测试（路由、API、文件服务、安全性）
 ```
@@ -240,35 +220,10 @@ echofs/
 ## 测试
 
 ```bash
-# 运行全部测试
 cargo test
-
-# 带详细输出运行
-cargo test --verbose
 ```
 
-项目包含超过 150 个自动化测试：
-
-- **单元测试** — 内嵌在各源码模块的 `#[cfg(test)]` 中，覆盖 Range 解析、目录列表、MIME 检测、错误处理、日志、模板内容、隐藏文件拦截、目录深度限制、速率解析、限速吞吐量验证、HTML/JSON 错误分发、WebDAV XML 生成、Depth 头解析、XML 转义
-- **集成测试** — 位于 `tests/integration_test.rs`，通过 `tower::ServiceExt::oneshot()` 测试完整的 Axum 路由：HTML 服务、JSON API 响应、Range 文件流、路径遍历安全、隐藏文件访问拒绝、目录深度限制、HEAD 方法支持、错误页面格式分发、MIME 类型、WebDAV（PROPFIND/OPTIONS 响应、Depth 0/1 行为、隐藏文件拦截、max-depth 限制、禁用标志行为）
-
-CI 在 Linux、macOS、Windows 三平台上运行 `cargo test`，通过后才构建发布产物。
-
-## 依赖项
-
-| Crate | 用途 |
-|-------|------|
-| [axum](https://crates.io/crates/axum) | HTTP 框架 |
-| [tokio](https://crates.io/crates/tokio) | 异步运行时 |
-| [tower-http](https://crates.io/crates/tower-http) | CORS 中间件 |
-| [tokio-util](https://crates.io/crates/tokio-util) | 流式文件 I/O |
-| [clap](https://crates.io/crates/clap) | 命令行参数解析 |
-| [serde](https://crates.io/crates/serde) / [serde_json](https://crates.io/crates/serde_json) | JSON 序列化 |
-| [mime_guess](https://crates.io/crates/mime_guess) / [mime](https://crates.io/crates/mime) | MIME 类型检测 |
-| [chrono](https://crates.io/crates/chrono) | 日期时间格式化 |
-| [percent-encoding](https://crates.io/crates/percent-encoding) | URL 编码 |
-| [open](https://crates.io/crates/open) | 打开浏览器 |
-| [libc](https://crates.io/crates/libc) | 网络接口枚举 |
+126 测试覆盖各模块单元测试和完整 HTTP 路由集成测试。
 
 ## 特别声明
 

@@ -124,81 +124,46 @@ pub async fn build_range_response(
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_full_range() {
-        let r = parse_range("bytes=0-499", 1000).unwrap();
-        assert_eq!(r.start, 0);
-        assert_eq!(r.end, 499);
+    /// Helper: assert parse_range returns Some with expected start/end.
+    fn assert_range(header: &str, file_size: u64, expected_start: u64, expected_end: u64) {
+        let r = parse_range(header, file_size)
+            .unwrap_or_else(|| panic!("expected Some for {:?} (size={})", header, file_size));
+        assert_eq!((r.start, r.end), (expected_start, expected_end),
+            "range mismatch for {:?} (size={})", header, file_size);
     }
 
     #[test]
-    fn parse_open_end_range() {
-        let r = parse_range("bytes=500-", 1000).unwrap();
-        assert_eq!(r.start, 500);
-        assert_eq!(r.end, 999);
+    fn valid_ranges() {
+        // (header, file_size, expected_start, expected_end)
+        let cases = [
+            ("bytes=0-499",   1000,  0, 499),   // full range
+            ("bytes=500-",    1000, 500, 999),   // open end
+            ("bytes=-200",    1000, 800, 999),   // suffix range
+            ("bytes=0-0",     1000,   0,   0),   // single byte
+            ("bytes=0-9999",   500,   0, 499),   // end clamped to file size
+            ("bytes=999-999", 1000, 999, 999),   // last byte
+        ];
+        for (header, size, start, end) in cases {
+            assert_range(header, size, start, end);
+        }
     }
 
     #[test]
-    fn parse_suffix_range() {
-        let r = parse_range("bytes=-200", 1000).unwrap();
-        assert_eq!(r.start, 800);
-        assert_eq!(r.end, 999);
-    }
-
-    #[test]
-    fn parse_single_byte_range() {
-        let r = parse_range("bytes=0-0", 1000).unwrap();
-        assert_eq!(r.start, 0);
-        assert_eq!(r.end, 0);
-    }
-
-    #[test]
-    fn parse_end_clamped_to_file_size() {
-        let r = parse_range("bytes=0-9999", 500).unwrap();
-        assert_eq!(r.start, 0);
-        assert_eq!(r.end, 499);
-    }
-
-    #[test]
-    fn parse_last_byte() {
-        let r = parse_range("bytes=999-999", 1000).unwrap();
-        assert_eq!(r.start, 999);
-        assert_eq!(r.end, 999);
-    }
-
-    #[test]
-    fn reject_no_bytes_prefix() {
-        assert!(parse_range("0-499", 1000).is_none());
-    }
-
-    #[test]
-    fn reject_start_ge_file_size() {
-        assert!(parse_range("bytes=1000-", 1000).is_none());
-    }
-
-    #[test]
-    fn reject_start_gt_end() {
-        assert!(parse_range("bytes=500-100", 1000).is_none());
-    }
-
-    #[test]
-    fn reject_suffix_zero() {
-        assert!(parse_range("bytes=-0", 1000).is_none());
-    }
-
-    #[test]
-    fn reject_suffix_gt_file_size() {
-        assert!(parse_range("bytes=-2000", 1000).is_none());
-    }
-
-    #[test]
-    fn reject_empty_file() {
-        assert!(parse_range("bytes=0-0", 0).is_none());
-    }
-
-    #[test]
-    fn reject_garbage() {
-        assert!(parse_range("bytes=abc-def", 1000).is_none());
-        assert!(parse_range("garbage", 1000).is_none());
+    fn rejected_ranges() {
+        // (header, file_size)
+        let cases = [
+            ("0-499",          1000), // no bytes= prefix
+            ("bytes=1000-",    1000), // start >= file_size
+            ("bytes=500-100",  1000), // start > end
+            ("bytes=-0",       1000), // suffix zero
+            ("bytes=-2000",    1000), // suffix > file_size
+            ("bytes=0-0",         0), // empty file
+            ("bytes=abc-def",  1000), // garbage values
+            ("garbage",        1000), // not a range at all
+        ];
+        for (header, size) in cases {
+            assert!(parse_range(header, size).is_none(),
+                "expected None for {:?} (size={})", header, size);
+        }
     }
 }

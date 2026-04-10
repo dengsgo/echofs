@@ -48,6 +48,54 @@ pub struct DirListing {
     pub entries: Vec<DirEntry>,
 }
 
+/// Resolve a path for write operations (PUT, MKCOL) where the target may not exist yet.
+/// Validates: hidden component check, depth check, parent directory exists and is within root.
+/// Returns the full (non-canonicalized) target path. The parent is canonicalized and verified.
+pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool, max_depth: i32) -> Result<PathBuf, AppError> {
+    let rel_path_owned = rel_path.trim_start_matches('/').to_string();
+
+    if rel_path_owned.is_empty() {
+        return Err(AppError::BadRequest("Cannot write to root".into()));
+    }
+
+    // Block access to hidden files/directories (any path component starting with '.')
+    if !show_hidden && has_hidden_component(&rel_path_owned) {
+        return Err(AppError::Forbidden("Access to hidden files is denied".into()));
+    }
+
+    let root = root.to_path_buf();
+    let rel = rel_path_owned.clone();
+    tokio::task::spawn_blocking(move || {
+        let target = root.join(&rel);
+
+        // Validate parent directory exists and is within root
+        let parent = target.parent().ok_or_else(|| {
+            AppError::BadRequest("Invalid path".into())
+        })?;
+
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+            AppError::Conflict("Parent directory does not exist".into())
+        })?;
+
+        if !canonical_parent.starts_with(&root) {
+            return Err(AppError::Forbidden("Path traversal denied".into()));
+        }
+
+        // Check depth: for files the depth is number of segments,
+        // for directories (MKCOL) same check applies
+        if max_depth >= 0 {
+            let depth = path_depth(&rel);
+            if depth > (max_depth as u32) + 1 {
+                return Err(AppError::Forbidden("Maximum directory depth exceeded".into()));
+            }
+        }
+
+        Ok(target)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
+}
+
 pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_depth: i32) -> Result<PathBuf, AppError> {
     let rel_path_owned = rel_path.trim_start_matches('/').to_string();
 
@@ -56,7 +104,6 @@ pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_de
         return Err(AppError::Forbidden("Access to hidden files is denied".into()));
     }
 
-    let max_depth = max_depth;
     let root = root.to_path_buf();
     let rel = rel_path_owned.clone();
     tokio::task::spawn_blocking(move || {
@@ -289,83 +336,68 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn format_size_zero() {
-        assert_eq!(format_size(0), "-");
-    }
+    // ─── Helper: create temp root ───
 
-    #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(100), "100 B");
-    }
-
-    #[test]
-    fn format_size_kb() {
-        assert_eq!(format_size(1024), "1.0 KB");
-    }
-
-    #[test]
-    fn format_size_mb() {
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-    }
-
-    #[test]
-    fn format_size_gb() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
-    }
-
-    #[test]
-    fn format_size_tb() {
-        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.0 TB");
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_root_itself() {
+    fn tmp_root() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        let resolved = safe_resolve(&root, "", false, -1).await.unwrap();
-        assert_eq!(resolved, root);
+        (tmp, root)
     }
 
+    // ─── format_size ───
+
+    #[test]
+    fn format_size_values() {
+        let cases: Vec<(u64, &str)> = vec![
+            (0,                              "-"),
+            (100,                            "100 B"),
+            (1024,                           "1.0 KB"),
+            (1024 * 1024,                    "1.0 MB"),
+            (1024 * 1024 * 1024,             "1.0 GB"),
+            (1024u64 * 1024 * 1024 * 1024,   "1.0 TB"),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(format_size(bytes), expected, "format_size({})", bytes);
+        }
+    }
+
+    // ─── safe_resolve ───
+
     #[tokio::test]
-    async fn safe_resolve_valid_child() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+    async fn safe_resolve_basic() {
+        let (_tmp, root) = tmp_root();
         fs::write(root.join("hello.txt"), "hi").unwrap();
-        let resolved = safe_resolve(&root, "hello.txt", false, -1).await.unwrap();
-        assert_eq!(resolved, root.join("hello.txt"));
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_strips_leading_slash() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
         fs::write(root.join("file.txt"), "data").unwrap();
-        let resolved = safe_resolve(&root, "/file.txt", false, -1).await.unwrap();
-        assert_eq!(resolved, root.join("file.txt"));
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_nonexistent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let result = safe_resolve(&root, "nonexistent.txt", false, -1).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_subdirectory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
         fs::create_dir(root.join("subdir")).unwrap();
-        let resolved = safe_resolve(&root, "subdir", false, -1).await.unwrap();
-        assert_eq!(resolved, root.join("subdir"));
+
+        // Root resolves to itself
+        assert_eq!(safe_resolve(&root, "", false, -1).await.unwrap(), root);
+        // File resolves correctly
+        assert_eq!(safe_resolve(&root, "hello.txt", false, -1).await.unwrap(), root.join("hello.txt"));
+        // Leading slash is stripped
+        assert_eq!(safe_resolve(&root, "/file.txt", false, -1).await.unwrap(), root.join("file.txt"));
+        // Subdirectory resolves
+        assert_eq!(safe_resolve(&root, "subdir", false, -1).await.unwrap(), root.join("subdir"));
+        // Nonexistent path errors
+        assert!(safe_resolve(&root, "nonexistent.txt", false, -1).await.is_err());
     }
+
+    #[tokio::test]
+    async fn safe_resolve_hidden_paths_denied() {
+        let (_tmp, root) = tmp_root();
+        fs::write(root.join(".secret"), "data").unwrap();
+        fs::create_dir_all(root.join("public/.hidden")).unwrap();
+        fs::write(root.join("public/.hidden/secret.txt"), "data").unwrap();
+
+        assert!(safe_resolve(&root, "/.secret", false, -1).await.is_err());
+        assert!(safe_resolve(&root, "public/.hidden/secret.txt", false, -1).await.is_err());
+    }
+
+    // ─── list_directory ───
 
     #[tokio::test]
     async fn list_directory_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let (_tmp, root) = tmp_root();
         let listing = list_directory(&root, "", false, -1).await.unwrap();
         assert!(listing.entries.is_empty());
         assert_eq!(listing.path, "/");
@@ -373,125 +405,66 @@ mod tests {
 
     #[tokio::test]
     async fn list_directory_files_and_dirs_sorted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let (_tmp, root) = tmp_root();
         fs::write(root.join("beta.txt"), "b").unwrap();
         fs::write(root.join("alpha.txt"), "a").unwrap();
         fs::create_dir(root.join("zdir")).unwrap();
+
         let listing = list_directory(&root, "", false, -1).await.unwrap();
-        // Directory should come first
         assert!(listing.entries[0].is_dir);
         assert_eq!(listing.entries[0].name, "zdir");
-        // Then files sorted alphabetically
         assert_eq!(listing.entries[1].name, "alpha.txt");
         assert_eq!(listing.entries[2].name, "beta.txt");
     }
 
     #[tokio::test]
     async fn list_directory_file_not_dir_errors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let (_tmp, root) = tmp_root();
         fs::write(root.join("file.txt"), "data").unwrap();
-        let result = list_directory(&root, "file.txt", false, -1).await;
-        assert!(result.is_err());
+        assert!(list_directory(&root, "file.txt", false, -1).await.is_err());
     }
 
     #[tokio::test]
     async fn list_directory_href_percent_encoding() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let (_tmp, root) = tmp_root();
         fs::write(root.join("my file.txt"), "data").unwrap();
         let listing = list_directory(&root, "", false, -1).await.unwrap();
         assert!(listing.entries[0].href.contains("my%20file.txt"));
     }
 
-    // ─── has_hidden_component pure function ───
+    // ─── has_hidden_component ───
 
     #[test]
-    fn has_hidden_component_dotfile() {
-        assert!(has_hidden_component(".env"));
+    fn has_hidden_component_cases() {
+        let cases = [
+            (".env",               true),
+            (".git/config",        true),
+            ("foo/.hidden/bar",    true),
+            ("foo/bar/baz.txt",    false),
+            ("",                   false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(has_hidden_component(path), expected,
+                "has_hidden_component({:?})", path);
+        }
     }
+
+    // ─── path_depth ───
 
     #[test]
-    fn has_hidden_component_dotdir_child() {
-        assert!(has_hidden_component(".git/config"));
-    }
-
-    #[test]
-    fn has_hidden_component_nested_dotdir() {
-        assert!(has_hidden_component("foo/.hidden/bar"));
-    }
-
-    #[test]
-    fn has_hidden_component_normal_path() {
-        assert!(!has_hidden_component("foo/bar/baz.txt"));
-    }
-
-    #[test]
-    fn has_hidden_component_empty() {
-        assert!(!has_hidden_component(""));
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_leading_slash_hidden_denied() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        fs::write(root.join(".secret"), "data").unwrap();
-        let result = safe_resolve(&root, "/.secret", false, -1).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn safe_resolve_nested_hidden_component_denied() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        fs::create_dir_all(root.join("public/.hidden")).unwrap();
-        fs::write(root.join("public/.hidden/secret.txt"), "data").unwrap();
-        let result = safe_resolve(&root, "public/.hidden/secret.txt", false, -1).await;
-        assert!(result.is_err());
-    }
-
-    // ─── path_depth tests ───
-
-    #[test]
-    fn path_depth_empty() {
-        assert_eq!(path_depth(""), 0);
-    }
-
-    #[test]
-    fn path_depth_single_segment() {
-        assert_eq!(path_depth("photos"), 1);
-    }
-
-    #[test]
-    fn path_depth_two_segments() {
-        assert_eq!(path_depth("photos/vacation"), 2);
-    }
-
-    #[test]
-    fn path_depth_three_segments() {
-        assert_eq!(path_depth("a/b/c"), 3);
-    }
-
-    #[test]
-    fn path_depth_leading_slash_ignored() {
-        // path_depth expects trimmed input (no leading slash), but handles it gracefully
-        assert_eq!(path_depth("/photos"), 1);
-    }
-
-    #[test]
-    fn path_depth_trailing_slash_ignored() {
-        assert_eq!(path_depth("photos/"), 1);
-    }
-
-    #[test]
-    fn path_depth_consecutive_slashes() {
-        // Empty segments from consecutive slashes should be filtered out
-        assert_eq!(path_depth("a//b"), 2);
-    }
-
-    #[test]
-    fn path_depth_only_slashes() {
-        assert_eq!(path_depth("/"), 0);
+    fn path_depth_cases() {
+        let cases = [
+            ("",                0),
+            ("photos",          1),
+            ("photos/vacation", 2),
+            ("a/b/c",           3),
+            ("/photos",         1),  // leading slash ignored
+            ("photos/",         1),  // trailing slash ignored
+            ("a//b",            2),  // consecutive slashes → empty segments filtered
+            ("/",               0),  // only slashes
+        ];
+        for (path, expected) in cases {
+            assert_eq!(path_depth(path), expected, "path_depth({:?})", path);
+        }
     }
 }

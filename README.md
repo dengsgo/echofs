@@ -5,29 +5,25 @@
 
 [中文文档](README_cn.md)
 
-A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. Supports read-only WebDAV for mounting as a network drive in file managers.
+A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. Supports full read-write WebDAV with optional authentication for mounting as a network drive.
 
 This is a native AI project, entirely written by AI.
 
 ## Features
 
-- **Single Binary** — Compiles to one ~1.4 MB executable, no runtime dependencies
-- **Directory Browsing** — Modern web UI with breadcrumb navigation and multi-level directory support
-- **Media Preview** — Play video/audio and view images directly in the browser (HTML5)
-- **Shareable Links** — Copy file links that work in external players like VLC and mpv
-- **HTTP Range Requests** — Full support for `206 Partial Content`, enabling video seeking and resumable downloads
-- **Sortable File List** — Sort by name, size, created time, or modified time (ascending/descending)
-- **Dark / Light Theme** — Toggle with one click, persisted via `localStorage`
-- **Responsive Design** — Card-based layout on mobile, table layout on desktop, optimized for iPad and phones
-- **Frosted Glass Header** — Sticky header with `backdrop-filter` blur effect
-- **LAN Access Info** — When binding to `0.0.0.0`, displays all available local network addresses
-- **Security** — Path traversal protection via `canonicalize` + `starts_with`; hidden files/directories (`.env`, `.git`, etc.) are blocked from both listings and direct URL access by default (use `--show-hidden` to allow)
-- **Directory Depth Limiting** — Restrict how deep users can browse with `--max-depth` (e.g., `--max-depth 1` for one level of subdirectories, `0` for root only)
-- **Per-Request Speed Limiting** — Throttle download speed per request with `--speed-limit` (e.g., `1m` for 1 MB/s, `500k` for 500 KB/s); uses token-bucket algorithm with async sleep, zero overhead when disabled
-- **WebDAV (Read-Only)** — Enabled by default; mount the served directory as a network drive in macOS Finder, Windows Explorer, or Linux file managers via standard WebDAV protocol (PROPFIND/OPTIONS); respects all security settings (hidden files, path traversal, depth limits); disable with `--no-webdav`
-- **HTML Error Pages** — Styled error pages for browser requests (404, 403, etc.), JSON errors for API clients
-- **Async I/O** — All filesystem operations run in `spawn_blocking` to avoid blocking the async runtime
-- **Access Logging** — Request logs to stdout (default), a file, or disabled entirely
+- **Single Binary** — ~1.4 MB executable, no runtime dependencies
+- **Directory Browsing** — Modern web UI with breadcrumb navigation
+- **Media Preview** — Play video/audio and view images directly in the browser
+- **Shareable Links** — Copy file links for external players (VLC, mpv, etc.)
+- **Range Requests** — Video seeking and resumable downloads via HTTP 206
+- **Sortable File List** — Sort by name, size, created/modified time
+- **Dark / Light Theme** — One-click toggle, auto-persisted
+- **Responsive Design** — Card layout on mobile, table on desktop
+- **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default
+- **Depth Limiting** — Restrict browsing depth with `--max-depth`
+- **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
+- **WebDAV (Read-Write)** — Mount as network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
+- **Access Logging** — Log to stdout, file, or disable entirely
 
 ## Quick Start
 
@@ -95,7 +91,9 @@ Options:
   -H, --show-hidden  Show hidden files and directories (names starting with '.')
   -d, --max-depth <MAX_DEPTH>  Maximum directory depth for browsing (-1 for unlimited) [default: -1]
   -s, --speed-limit <SPEED_LIMIT>  Speed limit per request, e.g. 500k, 1m, 10m [default: unlimited]
-      --no-webdav    Disable read-only WebDAV access [default: enabled]
+      --no-webdav    Disable WebDAV access [default: enabled]
+      --webdav-user <WEBDAV_USER>  WebDAV username (enables Basic Auth for WebDAV access; does not affect web UI)
+      --webdav-pass <WEBDAV_PASS>  WebDAV password (used with --webdav-user)
   -l, --log <LOG>    Access log output: "stdout", "off", or a file path [default: stdout]
   -h, --help         Print help
 ```
@@ -107,87 +105,68 @@ Options:
 echofs -r ~/Downloads -p 3000
 
 # Bind to localhost only (no LAN access)
-echofs -b 127.0.0.1 -p 8080
-
-# Serve and open browser
-echofs -r /media/videos --open
-
-# Log access to a file
-echofs --log /var/log/echofs.log
-
-# Disable access logging
-echofs --log off
+echofs -b 127.0.0.1
 
 # Show hidden files (e.g., .env, .git)
 echofs --show-hidden
 
-# Limit browsing depth to one level of subdirectories
-echofs --max-depth 1
-
-# Only allow browsing root directory
+# Limit browsing to root directory only
 echofs -d 0
 
 # Limit download speed to 1MB/s per request
-echofs --speed-limit 1m
+echofs -s 1m
 
-# Limit download speed to 500KB/s per request
-echofs -s 500k
+# Log to file / disable logging
+echofs --log /var/log/echofs.log
+echofs --log off
 
-# Disable WebDAV access
+# Disable WebDAV
 echofs --no-webdav
+
+# Require WebDAV authentication (does not affect browser access)
+echofs --webdav-user admin --webdav-pass secret
 ```
 
-#### WebDAV Access
+#### WebDAV
 
-WebDAV is enabled by default. File managers can mount the served directory as a network drive:
+WebDAV is enabled by default with full read-write support. Mount the served directory as a network drive:
 
-```bash
-# macOS Finder: Go → Connect to Server (⌘K)
-# Enter: http://localhost:8080
+- **macOS Finder**: Go → Connect to Server (⌘K) → `http://localhost:8080`
+- **Windows Explorer**: Map Network Drive → `\\localhost@8080\`
+- **Linux Nautilus**: Connect to Server → `dav://localhost:8080`
 
-# Windows Explorer: Map Network Drive
-# Enter: \\localhost@8080\
+When `--webdav-user` and `--webdav-pass` are set, all WebDAV operations (browsing, uploading, deleting, etc.) require Basic Auth. **This does not affect browser/web UI access** — the web interface remains open.
 
-# Linux (GNOME Files / Nautilus): Connect to Server
-# Enter: dav://localhost:8080
+Supported WebDAV methods: `PROPFIND`, `OPTIONS`, `LOCK`, `UNLOCK`, `PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`.
 
-# Command line (curl)
-curl -X PROPFIND http://localhost:8080/ -H "Depth: 1"
-curl -X OPTIONS http://localhost:8080/
-```
-
-When binding to `0.0.0.0`, the console shows all reachable addresses:
-
-```
-EchoFS serving /home/user/files on http://0.0.0.0:8080
-Available on:
-  http://127.0.0.1:8080
-  http://192.168.1.42:8080
-Listening on 0.0.0.0:8080
-```
-
-Access log format (enabled by default):
-
-```
-[2025-01-15 10:30:00] 192.168.1.5 GET P / 200 0.8ms
-[2025-01-15 10:30:00] 192.168.1.5 GET A / 200 0.5ms
-[2025-01-15 10:30:01] 192.168.1.5 GET P /photos/sunset.jpg 206 1.2ms
-```
+When binding to `0.0.0.0`, the console shows all reachable LAN addresses.
 
 ## API
 
-EchoFS provides a JSON API for directory listings. To get JSON instead of HTML for any directory path, include the `X-Requested-With: XMLHttpRequest` header in your request:
+EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XMLHttpRequest` header to get JSON instead of HTML:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` `HEAD` | `/` | Root directory — HTML UI or JSON listing (with `X-Requested-With: XMLHttpRequest` header) |
-| `GET` `HEAD` | `/{path}` | Subdirectory or file — directories return HTML/JSON, files are streamed; hidden paths (`.`-prefixed) return 403 unless `--show-hidden` is enabled |
-| `PROPFIND` | `/` `/{path}` | WebDAV directory/file metadata — returns `207 Multi-Status` XML; supports `Depth: 0` (self) and `Depth: 1` (self + children); enabled by default, disabled with `--no-webdav` |
-| `OPTIONS` | `/` `/{path}` | WebDAV capability discovery — returns `DAV: 1` header and allowed methods |
+| `GET` `HEAD` | `/` `/{path}` | Directory → HTML or JSON (with XHR header); File → streamed content |
+| `PROPFIND` | `/` `/{path}` | WebDAV metadata — `207 Multi-Status` XML (`Depth: 0` or `1`) |
+| `OPTIONS` | `/` `/{path}` | WebDAV capability discovery |
+| `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content) |
+| `DELETE` | `/{path}` | Delete a file or directory (204 No Content) |
+| `MKCOL` | `/{path}` | Create a directory (201 Created) |
+| `COPY` | `/{path}` | Copy a file/directory (`Destination` header required) |
+| `MOVE` | `/{path}` | Move/rename a file/directory (`Destination` header required) |
+| `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
+| `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
+| `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content) |
+| `DELETE` | `/{path}` | Delete a file or directory (204 No Content) |
+| `MKCOL` | `/{path}` | Create a directory (201 Created) |
+| `COPY` | `/{path}` | Copy a file/directory (`Destination` header required) |
+| `MOVE` | `/{path}` | Move/rename a file/directory (`Destination` header required) |
+| `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
+| `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
 
-Without the header, directory paths return the HTML UI. With the header, they return JSON.
-
-Response example:
+<details>
+<summary>JSON response example</summary>
 
 ```json
 {
@@ -213,6 +192,7 @@ Response example:
   ]
 }
 ```
+</details>
 
 ## Project Structure
 
@@ -232,7 +212,7 @@ echofs/
 │   ├── mime_utils.rs    MIME type detection and file icon mapping
 │   ├── error.rs         Unified error type with dual-mode responses (HTML/JSON)
 │   ├── throttle.rs      Per-request speed limiting (token-bucket ThrottledRead wrapper)
-│   └── webdav.rs        Read-only WebDAV: PROPFIND/OPTIONS handlers, XML response generation
+│   └── webdav.rs        WebDAV: PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH, auth, XML generation
 └── tests/
     └── integration_test.rs   Integration tests (router, API, file serving, security)
 ```
@@ -240,35 +220,10 @@ echofs/
 ## Testing
 
 ```bash
-# Run all tests
 cargo test
-
-# Run with verbose output
-cargo test --verbose
 ```
 
-The project includes over 150 automated tests:
-
-- **Unit tests** — embedded in each source module via `#[cfg(test)]`, covering range parsing, directory listing, MIME detection, error handling, logging, template content, hidden file blocking, directory depth limiting, speed limit parsing, throttled read throughput, HTML/JSON error dispatch, WebDAV XML generation, Depth header parsing, and XML escaping
-- **Integration tests** — in `tests/integration_test.rs`, testing the full Axum router via `tower::ServiceExt::oneshot()`: HTML serving, JSON API responses, file streaming with Range requests, path traversal security, hidden file access denial, directory depth enforcement, HEAD method support, error page format dispatch, MIME types, and WebDAV (PROPFIND/OPTIONS responses, Depth 0/1 behavior, hidden file blocking, max-depth enforcement, disabled-flag behavior)
-
-CI runs `cargo test` on Linux, macOS, and Windows before building release artifacts.
-
-## Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| [axum](https://crates.io/crates/axum) | HTTP framework |
-| [tokio](https://crates.io/crates/tokio) | Async runtime |
-| [tower-http](https://crates.io/crates/tower-http) | CORS middleware |
-| [tokio-util](https://crates.io/crates/tokio-util) | Streaming file I/O |
-| [clap](https://crates.io/crates/clap) | CLI argument parsing |
-| [serde](https://crates.io/crates/serde) / [serde_json](https://crates.io/crates/serde_json) | JSON serialization |
-| [mime_guess](https://crates.io/crates/mime_guess) / [mime](https://crates.io/crates/mime) | MIME type detection |
-| [chrono](https://crates.io/crates/chrono) | Date/time formatting |
-| [percent-encoding](https://crates.io/crates/percent-encoding) | URL encoding |
-| [open](https://crates.io/crates/open) | Open browser |
-| [libc](https://crates.io/crates/libc) | Network interface enumeration |
+126 tests covering unit tests (each module) and integration tests (full HTTP router via `tower::oneshot`).
 
 ## Disclaimer
 

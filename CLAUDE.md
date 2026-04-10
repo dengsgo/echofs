@@ -42,8 +42,11 @@ cargo build --release
 # Speed limit with suffix: 500k (KB/s), 2m (MB/s), 1g (GB/s)
 ./target/release/echofs -s 500k
 
-# WebDAV is enabled by default; disable it with:
+# WebDAV is enabled by default (read-write); disable it with:
 ./target/release/echofs --no-webdav
+
+# Require authentication for WebDAV access (does not affect browser/web UI)
+./target/release/echofs --webdav-user admin --webdav-pass secret
 
 # Mount via macOS Finder: Go → Connect to Server → http://localhost:8080
 # Mount via Windows Explorer: Map Network Drive → \\localhost@8080\
@@ -57,7 +60,7 @@ Single-binary SPA architecture: the HTML/CSS/JS is embedded in `template.rs` and
 
 - `lib.rs` — Library crate root: re-exports all modules as `pub mod` for use by `main.rs` and integration tests
 - `main.rs` — Entry point: CLI parsing, LAN IP detection, server startup; imports modules from the `echofs` library crate
-- `cli.rs` — clap derive CLI arguments (root, port, bind, open, log, show-hidden, max-depth, speed-limit, no-webdav)
+- `cli.rs` — clap derive CLI arguments (root, port, bind, open, log, show-hidden, max-depth, speed-limit, no-webdav, webdav-user, webdav-pass)
 - `server.rs` — Axum router setup, CORS layer, access log middleware, TCP listener; conditionally registers WebDAV routes (PROPFIND, OPTIONS) via `any()` handlers
 - `handlers.rs` — Route handlers: serves HTML for directories, streams files with Range support, JSON API; errors are dispatched via `AppError::into_response_for(&headers)` to return HTML for browsers or JSON for AJAX
 - `range.rs` — HTTP Range header parsing, builds 200/206/416 responses with streaming body; supports optional per-request speed limiting via `ThrottledRead` wrapper
@@ -67,12 +70,12 @@ Single-binary SPA architecture: the HTML/CSS/JS is embedded in `template.rs` and
 - `error.rs` — `AppError` enum with dual-mode responses: `into_response_for(headers)` returns HTML error pages for browser requests and JSON for AJAX requests; also implements `IntoResponse` (JSON-only) as fallback
 - `logging.rs` — Access log axum middleware; `LogTarget` enum (Stdout/Off/File) drives output; uses `ConnectInfo<SocketAddr>` for client IP and `tokio::sync::Mutex` for file writes
 - `throttle.rs` — `ThrottledRead<R: AsyncRead>` wrapper that limits read throughput using a token-bucket algorithm; also provides `parse_speed()` for human-readable rate strings (e.g. `500k`, `1m`)
-- `webdav.rs` — Read-only WebDAV support: handles PROPFIND (Depth 0/1) and OPTIONS methods; generates `207 Multi-Status` XML responses (`DAV:multistatus`) with resource properties (`displayname`, `getcontentlength`, `getlastmodified`, `getcontenttype`, `resourcetype`); reuses `directory::safe_resolve()` and `directory::list_directory()` for path safety and directory listing; XML is built via `format!` with no external XML library; enabled by default, disabled with `--no-webdav`
+- `webdav.rs` — Full read-write WebDAV support: handles PROPFIND (Depth 0/1), OPTIONS, LOCK, UNLOCK (read methods) and PUT, DELETE, MKCOL, COPY, MOVE, PROPPATCH (write methods); generates `207 Multi-Status` XML responses (`DAV:multistatus`) with resource properties (`displayname`, `getcontentlength`, `getlastmodified`, `getcontenttype`, `resourcetype`); provides `check_auth()` for Basic Auth enforcement via `--webdav-user`/`--webdav-pass` CLI flags (protects all operations when configured); reuses `directory::safe_resolve()` and `directory::safe_resolve_parent()` for path safety; XML is built via `XmlWriter` helper with no external XML library; enabled by default, disabled with `--no-webdav`
 
 ### Tests
 
-- `src/*.rs` — Each source module contains `#[cfg(test)] mod tests` with unit tests (105 total)
-- `tests/integration_test.rs` — Integration tests (49 total) that build the Axum router directly via `tower::ServiceExt::oneshot()`, covering HTML serving, JSON API, file streaming, Range requests, path traversal security, hidden file blocking, `--show-hidden` flag behavior, `--max-depth` directory depth limiting, HEAD method support, HTML/JSON error page dispatch, MIME types, and WebDAV (PROPFIND/OPTIONS responses, Depth 0/1, hidden file blocking, max-depth enforcement, disabled-flag behavior)
+- `src/*.rs` — Each source module contains `#[cfg(test)] mod tests` with unit tests (48 total)
+- `tests/integration_test.rs` — Integration tests (72 total) that build the Axum router directly via `tower::ServiceExt::oneshot()`, covering HTML serving, JSON API, file streaming, Range requests, path traversal security, hidden file blocking, `--show-hidden` flag behavior, `--max-depth` directory depth limiting, HEAD method support, HTML/JSON error page dispatch, MIME types, and WebDAV (PROPFIND/OPTIONS responses, Depth 0/1, hidden file blocking, max-depth enforcement, disabled-flag behavior, PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH write operations, Basic Auth enforcement)
 
 ### Routes
 
@@ -82,7 +85,13 @@ Single-binary SPA architecture: the HTML/CSS/JS is embedded in `template.rs` and
 | GET, HEAD | `/{*path}` | `serve_path` — directory → HTML (or JSON with XHR header), file → streamed content; hidden paths (any component starting with `.`) are rejected with 403 unless `--show-hidden` is enabled |
 | PROPFIND | `/` | `webdav::handle_webdav_root` — returns `207 Multi-Status` XML with directory/file properties; supports `Depth: 0` (self only) and `Depth: 1` (self + children); enabled by default, disabled with `--no-webdav` |
 | PROPFIND | `/{*path}` | `webdav::handle_webdav_path` — same as above for subpaths; reuses `safe_resolve()` for path safety |
-| OPTIONS | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — returns `DAV: 1` header and `Allow: OPTIONS, GET, HEAD, PROPFIND` |
+| PUT | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — upload/overwrite files; returns 201 Created or 204 No Content; requires auth when configured |
+| DELETE | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — remove files or directories (recursive); returns 204 No Content; requires auth when configured |
+| MKCOL | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — create directory; returns 201 Created; 409 Conflict if already exists; requires auth when configured |
+| COPY | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — copy file/directory to `Destination` header path; supports `Overwrite: T/F`; requires auth when configured |
+| MOVE | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — move/rename file/directory to `Destination` header path; supports `Overwrite: T/F`; requires auth when configured |
+| PROPPATCH | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — stub returning 207 success (macOS Finder compatibility) |
+| OPTIONS | `/`, `/{*path}` | `webdav::handle_webdav_root/path` — returns `DAV: 1, 2` header and `Allow: OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK` |
 
 ## Key Patterns
 
@@ -95,7 +104,7 @@ Single-binary SPA architecture: the HTML/CSS/JS is embedded in `template.rs` and
 - **Frontend navigation**: The SPA uses `history.pushState` for client-side routing. All `<a data-nav>` clicks are intercepted and handled via `fetch` with an `X-Requested-With: XMLHttpRequest` header, which makes the server return JSON instead of HTML for the same path. The page `<title>` updates dynamically to reflect the current directory name.
 - **Platform-specific code**: `main.rs` uses `#[cfg(unix)]` with `libc::getifaddrs` for network interface enumeration.
 - **Access logging**: Implemented as an axum `from_fn_with_state` middleware layer. `LogTarget` is passed as middleware state, separate from the app `AppState`. Log format: `[timestamp] ip method kind uri status elapsed_ms`, where `kind` is `A` (API/AJAX) or `P` (page).
-- **WebDAV (read-only)**: Enabled by default (disable with `--no-webdav`). Implements RFC 4918 compliance level 1 (read-only subset): `OPTIONS` advertises `DAV: 1`, `PROPFIND` returns `207 Multi-Status` XML with resource metadata. Depth header is parsed (`0` = self, `1` = self + children, `infinity` → capped to `1`). All path safety mechanisms (`safe_resolve`, hidden file blocking, `max-depth`) are fully enforced. XML is generated via `format!` macros with proper XML escaping — no external XML library. File downloads go through the existing GET/Range handler path, so speed limiting and streaming work transparently for WebDAV clients.
+- **WebDAV (read-write)**: Enabled by default (disable with `--no-webdav`). Implements RFC 4918 compliance level 1 and 2: `OPTIONS` advertises `DAV: 1, 2`, `PROPFIND` returns `207 Multi-Status` XML with resource metadata. Write operations: `PUT` (upload/overwrite), `DELETE` (remove file/directory), `MKCOL` (create directory), `COPY` (copy with `Destination` header), `MOVE` (rename/move with `Destination` header), `PROPPATCH` (stub returning success for Finder compatibility). `LOCK`/`UNLOCK` return valid responses for client compatibility. Optional Basic Auth via `--webdav-user`/`--webdav-pass` protects **all WebDAV operations** (both read and write) when configured; browser/web UI access (GET/HEAD via HTML pages) is never affected by auth. Auth is enforced at the top of the WebDAV dispatch handlers (`handle_webdav_root`/`handle_webdav_path`). Depth header is parsed (`0` = self, `1` = self + children, `infinity` → capped to `1`). All path safety mechanisms (`safe_resolve`, `safe_resolve_parent`, hidden file blocking, `max-depth`) are fully enforced. XML is generated via `XmlWriter` helper with proper XML escaping — no external XML library. File downloads go through the existing GET/Range handler path, so speed limiting and streaming work transparently for WebDAV clients.
 
 ## Code Style
 

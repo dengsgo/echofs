@@ -19,13 +19,14 @@ async fn dav_headers_middleware(request: Request<Body>, next: Next) -> Response<
     let headers = response.headers_mut();
     headers.insert("DAV", "1, 2".parse().expect("valid header"));
     if !headers.contains_key("Allow") {
-        headers.insert("Allow", "OPTIONS, GET, HEAD, PROPFIND, LOCK, UNLOCK".parse().expect("valid header"));
+        headers.insert("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK".parse().expect("valid header"));
     }
     response
 }
 
-pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget, show_hidden: bool, max_depth: i32, speed_limit: Option<u64>, webdav: bool) {
-    let state = Arc::new(AppState { root, show_hidden, max_depth, speed_limit, webdav });
+#[allow(clippy::too_many_arguments)]
+pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget, show_hidden: bool, max_depth: i32, speed_limit: Option<u64>, webdav: bool, webdav_user: Option<String>, webdav_pass: Option<String>) {
+    let state = Arc::new(AppState { root, show_hidden, max_depth, speed_limit, webdav, webdav_user, webdav_pass });
 
     let mut app = Router::new()
         .route("/", get(handlers::serve_index))
@@ -38,8 +39,8 @@ pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget, show_hidden: 
     }
 
     // Layer order: last .layer() = outermost (processes request first, response last).
-    // We want: request → dav_headers → cors → logging → handler → logging → cors → dav_headers → client
-    // So dav_headers_middleware is outermost to inject DAV headers on CORS preflight responses.
+    // We want: request → dav_headers → cors → logging → handler
+    // Auth is handled inside WebDAV handlers (does not affect browser/web page access).
     let app = if webdav {
         app.layer(axum::middleware::from_fn_with_state(
                 log_target,

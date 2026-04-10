@@ -149,77 +149,58 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     #[test]
-    fn parse_speed_bytes() {
-        assert_eq!(parse_speed("1024"), Some(1024));
-        assert_eq!(parse_speed("0"), None);
-        assert_eq!(parse_speed("-1"), None);
-        assert_eq!(parse_speed(""), None);
-    }
-
-    #[test]
-    fn parse_speed_kilobytes() {
-        assert_eq!(parse_speed("1k"), Some(1024));
-        assert_eq!(parse_speed("1K"), Some(1024));
-        assert_eq!(parse_speed("500k"), Some(512_000));
-    }
-
-    #[test]
-    fn parse_speed_megabytes() {
-        assert_eq!(parse_speed("1m"), Some(1_048_576));
-        assert_eq!(parse_speed("1M"), Some(1_048_576));
-        assert_eq!(parse_speed("10m"), Some(10_485_760));
-    }
-
-    #[test]
-    fn parse_speed_gigabytes() {
-        assert_eq!(parse_speed("1g"), Some(1_073_741_824));
-        assert_eq!(parse_speed("1G"), Some(1_073_741_824));
-    }
-
-    #[test]
-    fn parse_speed_fractional() {
-        assert_eq!(parse_speed("1.5m"), Some(1_572_864));
-        assert_eq!(parse_speed("0.5k"), Some(512));
+    fn parse_speed_valid() {
+        // (input, expected_bytes_per_sec)
+        let cases = [
+            ("1024",  1024),
+            ("1k",    1024),
+            ("1K",    1024),
+            ("500k",  512_000),
+            ("1m",    1_048_576),
+            ("1M",    1_048_576),
+            ("10m",   10_485_760),
+            ("1g",    1_073_741_824),
+            ("1G",    1_073_741_824),
+            ("1.5m",  1_572_864),
+            ("0.5k",  512),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_speed(input), Some(expected), "parse_speed({:?})", input);
+        }
     }
 
     #[test]
     fn parse_speed_invalid() {
-        assert_eq!(parse_speed("abc"), None);
-        assert_eq!(parse_speed("k"), None);
-        assert_eq!(parse_speed("-5m"), None);
+        let cases = ["0", "-1", "", "abc", "k", "-5m"];
+        for input in cases {
+            assert_eq!(parse_speed(input), None, "expected None for {:?}", input);
+        }
     }
 
     #[tokio::test]
     async fn throttled_read_limits_throughput() {
-        // Create a reader with 10KB of data, limited to 10KB/s
+        // 10KB of data at 10KB/s
         let data = vec![0u8; 10_240];
-        let cursor = std::io::Cursor::new(data);
-        let mut reader = ThrottledRead::new(cursor, 10_240);
+        let mut reader = ThrottledRead::new(std::io::Cursor::new(data), 10_240);
 
         let start = Instant::now();
-        let mut buf = vec![0u8; 20_480]; // ask for more than available
+        let mut buf = vec![0u8; 20_480];
         let mut total = 0;
-
         loop {
             let n = reader.read(&mut buf).await.unwrap();
-            if n == 0 {
-                break;
-            }
+            if n == 0 { break; }
             total += n;
         }
 
-        let elapsed = start.elapsed().as_secs_f64();
         assert_eq!(total, 10_240);
-        // Should take roughly 1 second (first second uses initial tokens)
         // Allow generous tolerance for CI
-        assert!(elapsed < 3.0, "took too long: {:.2}s", elapsed);
+        assert!(start.elapsed().as_secs_f64() < 3.0, "took too long");
     }
 
     #[tokio::test]
     async fn throttled_read_all_data_arrives() {
         let data: Vec<u8> = (0..=255).cycle().take(4096).collect();
-        let cursor = std::io::Cursor::new(data.clone());
-        let mut reader = ThrottledRead::new(cursor, 1_048_576); // 1MB/s — fast enough
+        let mut reader = ThrottledRead::new(std::io::Cursor::new(data.clone()), 1_048_576);
 
         let mut result = Vec::new();
         reader.read_to_end(&mut result).await.unwrap();

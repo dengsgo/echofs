@@ -37,9 +37,17 @@ pub struct Args {
     #[arg(short = 's', long)]
     pub speed_limit: Option<String>,
 
-    /// Disable read-only WebDAV access (PROPFIND support for file managers)
+    /// Disable WebDAV access (PROPFIND support for file managers)
     #[arg(long, default_value_t = false)]
     pub no_webdav: bool,
+
+    /// WebDAV username (enables Basic Auth for WebDAV access when set; does not affect web UI)
+    #[arg(long)]
+    pub webdav_user: Option<String>,
+
+    /// WebDAV password (used with --webdav-user)
+    #[arg(long)]
+    pub webdav_pass: Option<String>,
 }
 
 impl Args {

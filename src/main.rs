@@ -111,6 +111,8 @@ async fn main() {
 
     if args.no_webdav {
         println!("WebDAV: disabled");
+    } else if args.webdav_user.is_some() {
+        println!("WebDAV: enabled (auth required, user: {})", args.webdav_user.as_deref().unwrap_or(""));
     }
 
     if args.open {
@@ -118,5 +120,5 @@ async fn main() {
         let _ = open::that(&url);
     }
 
-    server::run(root, &addr, log_target, args.show_hidden, args.max_depth, speed_limit, webdav).await;
+    server::run(root, &addr, log_target, args.show_hidden, args.max_depth, speed_limit, webdav, args.webdav_user, args.webdav_pass).await;
 }

@@ -66,115 +66,61 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn detect_mime_mp4() {
-        let m = detect_mime(Path::new("video.mp4"));
-        assert_eq!(m.type_(), mime::VIDEO);
+    fn detect_mime_types() {
+        // (filename, expected_type_str)
+        let cases: Vec<(&str, &str)> = vec![
+            ("video.mp4",    "video"),
+            ("image.png",    "image"),
+            ("file.txt",     "text"),
+            ("file.xyzabc",  "application"),
+            ("noext",        "application"),
+        ];
+        for (file, expected_type) in cases {
+            let m = detect_mime(Path::new(file));
+            assert_eq!(m.type_().as_str(), expected_type, "MIME type mismatch for {}", file);
+        }
+        // Exact MIME checks
+        assert_eq!(detect_mime(Path::new("image.png")), mime::IMAGE_PNG);
+        assert_eq!(detect_mime(Path::new("file.txt")), mime::TEXT_PLAIN);
+        assert_eq!(detect_mime(Path::new("file.xyzabc")), mime::APPLICATION_OCTET_STREAM);
     }
 
     #[test]
-    fn detect_mime_png() {
-        let m = detect_mime(Path::new("image.png"));
-        assert_eq!(m, mime::IMAGE_PNG);
+    fn media_type_classification() {
+        // (filename, is_video, is_audio, is_image, is_text, is_media)
+        let cases = [
+            ("video.mp4", true,  false, false, false, true),
+            ("song.mp3",  false, true,  false, false, true),
+            ("photo.jpg", false, false, true,  false, true),
+            ("readme.txt",false, false, false, true,  false),
+        ];
+        for (file, vid, aud, img, txt, med) in cases {
+            let m = detect_mime(Path::new(file));
+            assert_eq!(is_video(&m), vid, "is_video mismatch for {}", file);
+            assert_eq!(is_audio(&m), aud, "is_audio mismatch for {}", file);
+            assert_eq!(is_image(&m), img, "is_image mismatch for {}", file);
+            assert_eq!(is_text(&m),  txt, "is_text mismatch for {}", file);
+            assert_eq!(is_media(&m), med, "is_media mismatch for {}", file);
+        }
     }
 
     #[test]
-    fn detect_mime_txt() {
-        let m = detect_mime(Path::new("file.txt"));
-        assert_eq!(m, mime::TEXT_PLAIN);
-    }
-
-    #[test]
-    fn detect_mime_unknown_ext() {
-        let m = detect_mime(Path::new("file.xyzabc"));
-        assert_eq!(m, mime::APPLICATION_OCTET_STREAM);
-    }
-
-    #[test]
-    fn detect_mime_no_extension() {
-        let m = detect_mime(Path::new("noext"));
-        assert_eq!(m, mime::APPLICATION_OCTET_STREAM);
-    }
-
-    #[test]
-    fn test_is_video() {
-        let m = detect_mime(Path::new("video.mp4"));
-        assert!(is_video(&m));
-        assert!(!is_audio(&m));
-        assert!(!is_image(&m));
-    }
-
-    #[test]
-    fn test_is_audio() {
-        let m = detect_mime(Path::new("song.mp3"));
-        assert!(is_audio(&m));
-        assert!(!is_video(&m));
-    }
-
-    #[test]
-    fn test_is_image() {
-        let m = detect_mime(Path::new("photo.jpg"));
-        assert!(is_image(&m));
-        assert!(!is_video(&m));
-    }
-
-    #[test]
-    fn test_is_text() {
-        let m = detect_mime(Path::new("readme.txt"));
-        assert!(is_text(&m));
-    }
-
-    #[test]
-    fn test_is_media() {
-        assert!(is_media(&detect_mime(Path::new("v.mp4"))));
-        assert!(is_media(&detect_mime(Path::new("a.mp3"))));
-        assert!(is_media(&detect_mime(Path::new("i.png"))));
-        assert!(!is_media(&detect_mime(Path::new("f.txt"))));
-    }
-
-    #[test]
-    fn icon_directory() {
-        assert_eq!(icon_for_path(Path::new("anything"), true), "folder");
-    }
-
-    #[test]
-    fn icon_video() {
-        assert_eq!(icon_for_path(Path::new("v.mp4"), false), "video");
-    }
-
-    #[test]
-    fn icon_audio() {
-        assert_eq!(icon_for_path(Path::new("a.mp3"), false), "audio");
-    }
-
-    #[test]
-    fn icon_image() {
-        assert_eq!(icon_for_path(Path::new("i.jpg"), false), "image");
-    }
-
-    #[test]
-    fn icon_text() {
-        assert_eq!(icon_for_path(Path::new("f.txt"), false), "text");
-    }
-
-    #[test]
-    fn icon_code() {
-        // .rs is detected as text/x-rust by mime_guess, so is_text() matches first.
-        // Use an extension that mime_guess doesn't recognize as text, e.g. .go
-        assert_eq!(icon_for_path(Path::new("main.go"), false), "code");
-    }
-
-    #[test]
-    fn icon_archive() {
-        assert_eq!(icon_for_path(Path::new("data.zip"), false), "archive");
-    }
-
-    #[test]
-    fn icon_pdf() {
-        assert_eq!(icon_for_path(Path::new("doc.pdf"), false), "pdf");
-    }
-
-    #[test]
-    fn icon_unknown() {
-        assert_eq!(icon_for_path(Path::new("file.xyzabc"), false), "file");
+    fn icon_mapping() {
+        // (filename, is_dir, expected_icon)
+        let cases = [
+            ("anything",    true,  "folder"),
+            ("v.mp4",       false, "video"),
+            ("a.mp3",       false, "audio"),
+            ("i.jpg",       false, "image"),
+            ("f.txt",       false, "text"),
+            ("main.go",     false, "code"),    // .go not detected as text by mime_guess
+            ("data.zip",    false, "archive"),
+            ("doc.pdf",     false, "pdf"),
+            ("file.xyzabc", false, "file"),
+        ];
+        for (file, is_dir, expected) in cases {
+            assert_eq!(icon_for_path(Path::new(file), is_dir), expected,
+                "icon mismatch for {} (is_dir={})", file, is_dir);
+        }
     }
 }

@@ -17,6 +17,8 @@ pub struct AppState {
     pub max_depth: i32,
     pub speed_limit: Option<u64>,
     pub webdav: bool,
+    pub webdav_user: Option<String>,
+    pub webdav_pass: Option<String>,
 }
 
 fn is_ajax(headers: &HeaderMap) -> bool {

@@ -8,6 +8,7 @@ pub enum AppError {
     NotFound(String),
     Forbidden(String),
     BadRequest(String),
+    Conflict(String),
     Internal(String),
 }
 
@@ -17,6 +18,7 @@ impl std::fmt::Display for AppError {
             AppError::NotFound(msg) => write!(f, "Not Found: {}", msg),
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
+            AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
         }
     }
@@ -28,6 +30,7 @@ impl AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "Not Found", msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "Forbidden", msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "Bad Request", msg),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, "Conflict", msg),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error", msg),
         }
     }
@@ -76,65 +79,41 @@ mod tests {
     use axum::http::StatusCode;
 
     #[test]
-    fn not_found_status() {
-        let resp = AppError::NotFound("gone".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    fn error_status_codes() {
+        let cases: Vec<(AppError, StatusCode)> = vec![
+            (AppError::NotFound("gone".into()),    StatusCode::NOT_FOUND),
+            (AppError::Forbidden("nope".into()),   StatusCode::FORBIDDEN),
+            (AppError::BadRequest("bad".into()),   StatusCode::BAD_REQUEST),
+            (AppError::Internal("oops".into()),    StatusCode::INTERNAL_SERVER_ERROR),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.into_response().status(), expected);
+        }
     }
 
     #[test]
-    fn forbidden_status() {
-        let resp = AppError::Forbidden("nope".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    fn display_format() {
+        let cases = [
+            (AppError::NotFound("test".into()),   "Not Found: test"),
+            (AppError::Forbidden("test".into()),  "Forbidden: test"),
+            (AppError::BadRequest("test".into()), "Bad Request: test"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(format!("{}", err), expected);
+        }
     }
 
     #[test]
-    fn bad_request_status() {
-        let resp = AppError::BadRequest("bad".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn internal_status() {
-        let resp = AppError::Internal("oops".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn display_not_found() {
-        let e = AppError::NotFound("test".into());
-        assert_eq!(format!("{}", e), "Not Found: test");
-    }
-
-    #[test]
-    fn display_forbidden() {
-        let e = AppError::Forbidden("test".into());
-        assert_eq!(format!("{}", e), "Forbidden: test");
-    }
-
-    #[test]
-    fn display_bad_request() {
-        let e = AppError::BadRequest("test".into());
-        assert_eq!(format!("{}", e), "Bad Request: test");
-    }
-
-    #[test]
-    fn from_io_not_found() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
-        let app_err = AppError::from(io_err);
-        assert!(matches!(app_err, AppError::NotFound(_)));
-    }
-
-    #[test]
-    fn from_io_permission_denied() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let app_err = AppError::from(io_err);
-        assert!(matches!(app_err, AppError::Forbidden(_)));
-    }
-
-    #[test]
-    fn from_io_other() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
-        let app_err = AppError::from(io_err);
-        assert!(matches!(app_err, AppError::Internal(_)));
+    fn from_io_error() {
+        use std::io::{Error, ErrorKind};
+        let cases: Vec<(ErrorKind, fn(&AppError) -> bool)> = vec![
+            (ErrorKind::NotFound,         |e| matches!(e, AppError::NotFound(_))),
+            (ErrorKind::PermissionDenied, |e| matches!(e, AppError::Forbidden(_))),
+            (ErrorKind::BrokenPipe,       |e| matches!(e, AppError::Internal(_))),
+        ];
+        for (kind, check) in cases {
+            let app_err = AppError::from(Error::new(kind, "msg"));
+            assert!(check(&app_err), "wrong variant for {:?}", kind);
+        }
     }
 }
