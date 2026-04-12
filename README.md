@@ -157,13 +157,6 @@ EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XM
 | `MOVE` | `/{path}` | Move/rename a file/directory (`Destination` header required) |
 | `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
 | `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
-| `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content) |
-| `DELETE` | `/{path}` | Delete a file or directory (204 No Content) |
-| `MKCOL` | `/{path}` | Create a directory (201 Created) |
-| `COPY` | `/{path}` | Copy a file/directory (`Destination` header required) |
-| `MOVE` | `/{path}` | Move/rename a file/directory (`Destination` header required) |
-| `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
-| `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
 
 <details>
 <summary>JSON response example</summary>

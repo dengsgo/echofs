@@ -157,13 +157,6 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求中添加 `X-Requested-W
 | `MOVE` | `/{path}` | 移动/重命名文件/目录（需 `Destination` 头） |
 | `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
 | `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
-| `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content） |
-| `DELETE` | `/{path}` | 删除文件或目录（204 No Content） |
-| `MKCOL` | `/{path}` | 创建目录（201 Created） |
-| `COPY` | `/{path}` | 复制文件/目录（需 `Destination` 头） |
-| `MOVE` | `/{path}` | 移动/重命名文件/目录（需 `Destination` 头） |
-| `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
-| `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
 
 <details>
 <summary>JSON 响应示例</summary>
