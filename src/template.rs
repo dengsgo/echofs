@@ -236,6 +236,25 @@ body {
   border-color: #30d158 !important;
 }
 
+/* ===== QR Modal ===== */
+.qr-modal {
+  text-align: center;
+  padding: 24px;
+}
+.qr-modal canvas {
+  display: block;
+  margin: 0 auto 16px;
+  border-radius: 8px;
+}
+.qr-url {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+  max-width: 280px;
+  margin: 0 auto;
+  line-height: 1.4;
+}
+
 /* ===== Card list (mobile) ===== */
 .file-list { display: none; }
 .file-card {
@@ -425,6 +444,16 @@ body {
   </div>
 </div>
 
+<!-- QR Code Modal -->
+<div class="modal-overlay" id="qrModal">
+  <div class="modal">
+    <button class="modal-close" id="qrModalClose">&times;</button>
+    <div class="modal-title" id="qrModalTitle">QR Code</div>
+    <div class="qr-modal" id="qrModalContent"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script>
 (function() {
   const ICONS = {
@@ -579,7 +608,7 @@ body {
         ? '<a href="' + escHtml(e.href) + '" class="dir-link" data-nav>' + escHtml(e.name) + '</a>'
         : '<a href="' + escHtml(e.href) + '">' + escHtml(e.name) + '</a>';
 
-      let actions = '<button class="btn" onclick="copyLink(\'' + escJs(e.href) + '\', this)">Copy Link</button>';
+      let actions = '<button class="btn" onclick="copyLink(\'' + escJs(e.href) + '\', this)">Copy Link</button><button class="btn" onclick="showQr(\'' + escJs(e.href) + '\')">QR</button>';
       if (e.media_type === 'video' || e.media_type === 'audio' || e.media_type === 'image') {
         actions = '<button class="btn btn-preview" onclick="previewMedia(\'' + escJs(e.href) + '\', \'' + escJs(e.name) + '\', \'' + escJs(e.media_type) + '\')">Preview</button>' + actions;
       }
@@ -608,7 +637,7 @@ body {
       if (!e.is_dir) meta.push(escHtml(e.size_display));
       if (e.modified) meta.push(escHtml(e.modified));
 
-      let actions = '<button class="btn" onclick="event.stopPropagation();copyLink(\'' + escJs(e.href) + '\', this)">Copy</button>';
+      let actions = '<button class="btn" onclick="event.stopPropagation();copyLink(\'' + escJs(e.href) + '\', this)">Copy</button><button class="btn" onclick="event.stopPropagation();showQr(\'' + escJs(e.href) + '\')">QR</button>';
       if (e.media_type === 'video' || e.media_type === 'audio' || e.media_type === 'image') {
         actions = '<button class="btn btn-preview" onclick="event.stopPropagation();previewMedia(\'' + escJs(e.href) + '\', \'' + escJs(e.name) + '\', \'' + escJs(e.media_type) + '\')">Play</button>' + actions;
       }
@@ -635,6 +664,58 @@ body {
         sortAndRender();
       });
     });
+  }
+
+  // QR code generation (minimal inline QR encoder)
+  // QR Code generation using qrcode-generator library
+  function makeQrCanvas(text, cellSize) {
+    var qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    var count = qr.getModuleCount();
+    var scale = cellSize || 5;
+    var canvas = document.createElement('canvas');
+    var size = count * scale;
+    canvas.width = size; canvas.height = size;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#1d1d1f';
+    for (var y = 0; y < count; y++) for (var x = 0; x < count; x++) {
+      if (qr.isDark(y, x)) ctx.fillRect(x * scale, y * scale, scale, scale);
+    }
+    return canvas;
+  }
+
+  // QR Code modal
+  window.showQr = function(href) {
+    var url = location.origin + href;
+    var modal = document.getElementById('qrModal');
+    var content = document.getElementById('qrModalContent');
+    try {
+      var canvas = makeQrCanvas(url, 5);
+      content.innerHTML = '';
+      content.appendChild(canvas);
+      var urlDiv = document.createElement('div');
+      urlDiv.className = 'qr-url';
+      urlDiv.textContent = url;
+      content.appendChild(urlDiv);
+    } catch(e) {
+      content.innerHTML = '<p>URL too long for QR code</p>';
+    }
+    modal.classList.add('active');
+    document.body.style.overflow = 'hidden';
+  };
+
+  document.getElementById('qrModalClose').addEventListener('click', closeQrModal);
+  document.getElementById('qrModal').addEventListener('click', function(e) {
+    if (e.target === this) closeQrModal();
+  });
+
+  function closeQrModal() {
+    var modal = document.getElementById('qrModal');
+    modal.classList.remove('active');
+    document.body.style.overflow = '';
   }
 
   // Copy link
@@ -697,7 +778,7 @@ body {
     if (e.target === this) closeModal();
   });
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape') { closeModal(); closeQrModal(); }
   });
 
   function closeModal() {
