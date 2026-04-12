@@ -5,9 +5,9 @@
 
 [中文文档](README_cn.md)
 
-A lightweight, single-binary file server written in Rust. Browse directories, preview media files, and share links — all from your terminal. Supports full read-write WebDAV with optional authentication for mounting as a network drive.
+A lightweight, single-binary file server written in Rust.
 
-This is a native AI project, entirely written by AI.
+Browse directories, preview media files, and share links — all from your terminal. With full read-write WebDAV support, mount your shared directory as a network drive on desktop, phone, or tablet — access and manage your files seamlessly from any device.
 
 ## Features
 
