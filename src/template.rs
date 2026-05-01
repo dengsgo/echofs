@@ -350,6 +350,29 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 .modal-close:hover { background: rgba(0,0,0,0.7); }
+.nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(0,0,0,0.45);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s;
+}
+.nav-btn:hover { background: rgba(0,0,0,0.7); }
+.nav-btn.visible { display: flex; }
+.nav-prev { left: 8px; }
+.nav-next { right: 8px; }
 .modal video, .modal audio { display: block; max-width: 88vw; max-height: 80vh; }
 .modal img { display: block; max-width: 88vw; max-height: 80vh; object-fit: contain; }
 .modal-title {
@@ -407,6 +430,9 @@ body {
   .modal { border-radius: 8px; }
   .modal video, .modal audio { max-width: 94vw; max-height: 75vh; }
   .modal img { max-width: 94vw; max-height: 75vh; }
+  .nav-btn { width: 44px; height: 44px; font-size: 22px; }
+  .nav-prev { left: 4px; }
+  .nav-next { right: 4px; }
 }
 
 /* ===== Fullscreen modal on very small screens ===== */
@@ -440,6 +466,8 @@ body {
   <div class="modal">
     <button class="modal-close" id="modalClose">&times;</button>
     <div class="modal-title" id="modalTitle"></div>
+    <button class="nav-btn nav-prev" id="navPrev">&#10094;</button>
+    <button class="nav-btn nav-next" id="navNext">&#10095;</button>
     <div id="modalContent"></div>
   </div>
 </div>
@@ -475,6 +503,8 @@ body {
   let currentEntries = [];
   let sortField = 'name';
   let sortAsc = true;
+  let imageList = [];
+  let currentImageIndex = -1;
 
   function isMobile() { return window.innerWidth <= 768; }
 
@@ -761,16 +791,85 @@ body {
     title.textContent = name;
     mc.innerHTML = '';
 
+    // Build image list for gallery navigation
+    imageList = currentEntries.filter(e => e.media_type === 'image').map(e => ({ href: e.href, name: e.name }));
+    currentImageIndex = -1;
+    if (type === 'image') {
+      currentImageIndex = imageList.findIndex(img => img.href === href);
+    }
+
     if (type === 'video') {
       mc.innerHTML = '<video controls autoplay playsinline><source src="' + escHtml(href) + '">Your browser does not support video playback.</video>';
     } else if (type === 'audio') {
       mc.innerHTML = '<audio controls autoplay><source src="' + escHtml(href) + '">Your browser does not support audio playback.</audio>';
     } else if (type === 'image') {
       mc.innerHTML = '<img src="' + escHtml(href) + '" alt="' + escHtml(name) + '">';
+      updateImageCounter(title, name);
     }
+    updateNavButtons();
     modal.classList.add('active');
     document.body.style.overflow = 'hidden';
   };
+
+  function updateImageCounter(titleEl, name) {
+    if (imageList.length > 1 && currentImageIndex >= 0) {
+      titleEl.textContent = name + ' (' + (currentImageIndex + 1) + ' / ' + imageList.length + ')';
+    }
+  }
+
+  function updateNavButtons() {
+    const prevBtn = document.getElementById('navPrev');
+    const nextBtn = document.getElementById('navNext');
+    if (imageList.length <= 1 || currentImageIndex < 0) {
+      prevBtn.classList.remove('visible');
+      nextBtn.classList.remove('visible');
+      return;
+    }
+    prevBtn.classList.toggle('visible', currentImageIndex > 0);
+    nextBtn.classList.toggle('visible', currentImageIndex < imageList.length - 1);
+  }
+
+  function navigateImage(direction) {
+    if (imageList.length <= 1) return;
+    const newIndex = currentImageIndex + direction;
+    if (newIndex < 0 || newIndex >= imageList.length) return;
+    currentImageIndex = newIndex;
+    const img = imageList[currentImageIndex];
+    const mc = document.getElementById('modalContent');
+    mc.innerHTML = '<img src="' + escHtml(img.href) + '" alt="' + escHtml(img.name) + '">';
+    const title = document.getElementById('modalTitle');
+    updateImageCounter(title, img.name);
+    updateNavButtons();
+  }
+
+  document.getElementById('navPrev').addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigateImage(-1);
+  });
+  document.getElementById('navNext').addEventListener('click', function(e) {
+    e.stopPropagation();
+    navigateImage(1);
+  });
+
+  // Touch swipe support for image gallery
+  (function() {
+    var startX = 0;
+    var startY = 0;
+    var mc = document.getElementById('modalContent');
+    mc.addEventListener('touchstart', function(e) {
+      if (imageList.length <= 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    }, { passive: true });
+    mc.addEventListener('touchend', function(e) {
+      if (imageList.length <= 1 || startX === 0) return;
+      var dx = e.changedTouches[0].clientX - startX;
+      var dy = e.changedTouches[0].clientY - startY;
+      startX = 0;
+      if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
+      navigateImage(dx > 0 ? -1 : 1);
+    }, { passive: true });
+  })();
 
   // Modal close
   document.getElementById('modalClose').addEventListener('click', closeModal);
@@ -779,6 +878,10 @@ body {
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') { closeModal(); closeQrModal(); }
+    if (imageList.length > 1 && currentImageIndex >= 0) {
+      if (e.key === 'ArrowLeft') navigateImage(-1);
+      else if (e.key === 'ArrowRight') navigateImage(1);
+    }
   });
 
   function closeModal() {
@@ -788,6 +891,9 @@ body {
     const mc = document.getElementById('modalContent');
     mc.querySelectorAll('video, audio').forEach(el => { el.pause(); el.src = ''; });
     mc.innerHTML = '';
+    imageList = [];
+    currentImageIndex = -1;
+    updateNavButtons();
   }
 
   // Client-side navigation
