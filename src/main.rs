@@ -1,5 +1,5 @@
 use clap::Parser;
-use echofs::{cli, logging, server};
+use echofs::{cli, handlers::AppState, logging, server};
 use cli::Args;
 use std::net::IpAddr;
 
@@ -120,5 +120,15 @@ async fn main() {
         let _ = open::that(&url);
     }
 
-    server::run(root, &addr, log_target, args.show_hidden, args.max_depth, speed_limit, webdav, args.webdav_user, args.webdav_pass).await;
+    let state = AppState {
+        root,
+        show_hidden: args.show_hidden,
+        max_depth: args.max_depth,
+        speed_limit,
+        webdav,
+        webdav_user: args.webdav_user,
+        webdav_pass: args.webdav_pass,
+    };
+
+    server::run(state, &addr, log_target).await;
 }

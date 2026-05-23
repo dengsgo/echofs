@@ -4,7 +4,6 @@ use axum::http::{Request, Response};
 use axum::middleware::Next;
 use axum::routing::{any, get};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -24,9 +23,9 @@ async fn dav_headers_middleware(request: Request<Body>, next: Next) -> Response<
     response
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(root: PathBuf, addr: &str, log_target: LogTarget, show_hidden: bool, max_depth: i32, speed_limit: Option<u64>, webdav: bool, webdav_user: Option<String>, webdav_pass: Option<String>) {
-    let state = Arc::new(AppState { root, show_hidden, max_depth, speed_limit, webdav, webdav_user, webdav_pass });
+pub async fn run(state: AppState, addr: &str, log_target: LogTarget) {
+    let webdav = state.webdav;
+    let state = Arc::new(state);
 
     let mut app = Router::new()
         .route("/", get(handlers::serve_index))
