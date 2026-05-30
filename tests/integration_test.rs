@@ -1165,3 +1165,47 @@ async fn no_auth_allows_all_operations() {
     env.propfind("/", "1").await.assert_status(StatusCode::MULTI_STATUS);
     env.method_with_body("PUT", "/new.txt", "data").await.assert_status(StatusCode::CREATED);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JSON response includes webdav/webdav_auth fields
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn json_response_includes_webdav_true_when_enabled() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "hello");
+    let json = env.xhr("/").await.json().await;
+    assert_eq!(json["webdav"], true);
+    assert_eq!(json["webdav_auth"], false);
+    // Also verify entries still work
+    assert!(json["entries"].is_array());
+}
+
+#[tokio::test]
+async fn json_response_includes_webdav_false_when_disabled() {
+    let env = TestEnv::new(); // no .webdav()
+    env.write("file.txt", "hello");
+    let json = env.xhr("/").await.json().await;
+    assert_eq!(json["webdav"], false);
+    assert_eq!(json["webdav_auth"], false);
+}
+
+#[tokio::test]
+async fn json_response_includes_webdav_auth_true_when_configured() {
+    let env = TestEnv::new().webdav().auth("admin", "secret");
+    env.write("file.txt", "hello");
+    let json = env.xhr("/").await.json().await;
+    assert_eq!(json["webdav"], true);
+    assert_eq!(json["webdav_auth"], true);
+}
+
+#[tokio::test]
+async fn json_response_subdir_includes_webdav_fields() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("subdir");
+    env.write("subdir/file.txt", "hello");
+    let json = env.xhr("/subdir").await.json().await;
+    assert_eq!(json["webdav"], true);
+    assert_eq!(json["webdav_auth"], false);
+    assert!(json["entries"].is_array());
+}

@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, Response, header};
 use axum::response::{Html, IntoResponse};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,12 +22,29 @@ pub struct AppState {
     pub webdav_pass: Option<String>,
 }
 
+/// JSON response wrapper that includes directory listing + server capabilities.
+#[derive(Serialize)]
+struct DirResponse {
+    #[serde(flatten)]
+    listing: directory::DirListing,
+    webdav: bool,
+    webdav_auth: bool,
+}
+
 fn is_ajax(headers: &HeaderMap) -> bool {
     headers
         .get("X-Requested-With")
         .and_then(|v| v.to_str().ok())
         .map(|v| v == "XMLHttpRequest")
         .unwrap_or(false)
+}
+
+fn dir_response(listing: directory::DirListing, state: &AppState) -> DirResponse {
+    DirResponse {
+        listing,
+        webdav: state.webdav,
+        webdav_auth: state.webdav_user.is_some(),
+    }
 }
 
 pub async fn serve_index(
@@ -37,7 +55,7 @@ pub async fn serve_index(
     if full_path.is_dir() {
         let mut resp = if is_ajax(&headers) {
             match directory::list_directory(&state.root, "", state.show_hidden, state.max_depth).await {
-                Ok(listing) => axum::Json(listing).into_response(),
+                Ok(listing) => axum::Json(dir_response(listing, &state)).into_response(),
                 Err(e) => e.into_response_for(&headers),
             }
         } else {
@@ -68,7 +86,7 @@ pub async fn serve_path(
     if resolved.is_dir() {
         let mut resp = if is_ajax(&headers) {
             match directory::list_directory(&state.root, &rel_path, state.show_hidden, state.max_depth).await {
-                Ok(listing) => axum::Json(listing).into_response(),
+                Ok(listing) => axum::Json(dir_response(listing, &state)).into_response(),
                 Err(e) => e.into_response_for(&headers),
             }
         } else {

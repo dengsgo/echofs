@@ -13,12 +13,13 @@ Browse directories, preview media files, and share links — all from your termi
 
 - **Single Binary** — ~1.4 MB executable, no runtime dependencies
 - **Directory Browsing** — Modern web UI with breadcrumb navigation
-- **Media Preview** — Play video/audio and view images directly in the browser
-- **Shareable Links** — Copy file links for external players (VLC, mpv, etc.)
+- **Media Preview** — Play video/audio and view images directly in the browser (gallery mode with swipe/keyboard navigation)
+- **Shareable Links** — Copy file links and QR codes for external players (VLC, mpv, etc.)
 - **Range Requests** — Video seeking and resumable downloads via HTTP 206
 - **Sortable File List** — Sort by name, size, created/modified time
-- **Dark / Light Theme** — One-click toggle, auto-persisted
+- **Multiple Themes** — Classic, Liquid Glass (iOS 26-style frosted glass), and Cartoon (comic-style), each with light/dark mode
 - **Responsive Design** — Card layout on mobile, table on desktop
+- **Web File Management** — Upload, rename, and delete files directly from the browser (powered by WebDAV)
 - **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default
 - **Depth Limiting** — Restrict browsing depth with `--max-depth`
 - **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
@@ -135,7 +136,7 @@ WebDAV is enabled by default with full read-write support. Mount the served dire
 - **Windows Explorer**: Map Network Drive → `\\localhost@8080\`
 - **Linux Nautilus**: Connect to Server → `dav://localhost:8080`
 
-When `--webdav-user` and `--webdav-pass` are set, all WebDAV operations (browsing, uploading, deleting, etc.) require Basic Auth. **This does not affect browser/web UI access** — the web interface remains open.
+When `--webdav-user` and `--webdav-pass` are set, all WebDAV operations (browsing, uploading, deleting, etc.) require Basic Auth. **The web UI file management features (upload/rename/delete) share the same credentials** — users will be prompted to log in when performing these operations.
 
 Supported WebDAV methods: `PROPFIND`, `OPTIONS`, `LOCK`, `UNLOCK`, `PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`.
 
@@ -182,7 +183,9 @@ EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XM
       "href": "/photos/sunset.jpg",
       "media_type": "image"
     }
-  ]
+  ],
+  "webdav": true,
+  "webdav_auth": false
 }
 ```
 </details>
@@ -216,7 +219,7 @@ echofs/
 cargo test
 ```
 
-126 tests covering unit tests (each module) and integration tests (full HTTP router via `tower::oneshot`).
+130 tests covering unit tests (each module) and integration tests (full HTTP router via `tower::oneshot`).
 
 ## Disclaimer
 
