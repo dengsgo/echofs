@@ -311,7 +311,9 @@ mod tests {
     /// segment must all appear in the final HTML, in the right order.
     #[test]
     fn css_and_js_are_composed_via_include_str() {
-        let html = index_html();
+        // Normalize CRLF → LF so the test works on Windows CI where
+        // actions/checkout converts line endings.
+        let html = index_html().replace("\r\n", "\n");
 
         // Order check: <style> opens BEFORE the JS IIFE, which opens BEFORE </body>.
         let style_open = html.find("<style>").expect("missing <style>");
