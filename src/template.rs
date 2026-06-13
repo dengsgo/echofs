@@ -504,7 +504,9 @@ mod tests {
     ///      isn't silent.
     #[test]
     fn plyr_falls_back_to_native_on_cdn_failure() {
-        let html = index_html();
+        // Normalize CRLF → LF so the test works on Windows CI where
+        // actions/checkout converts line endings.
+        let html = index_html().replace("\r\n", "\n");
         // (1) Hard timeout — the constant and the setTimeout that uses it.
         assert!(
             html.contains("PLYR_LOAD_TIMEOUT_MS"),
