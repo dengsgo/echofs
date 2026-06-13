@@ -450,6 +450,245 @@ mod tests {
         assert!(html.contains("Promise.all(workers)"));
     }
 
+    /// Plyr (the video player) is loaded from CDN on demand. The page must NOT
+    /// fetch plyr.js / plyr.css eagerly — only the JS string constants pointing
+    /// at the CDN should appear in the bundled HTML, never inside a <script src>
+    /// or <link rel=stylesheet href> tag in the static markup.
+    #[test]
+    fn plyr_is_lazy_loaded_only() {
+        let html = index_html();
+        // Lazy loader must be present and use a cached promise.
+        assert!(html.contains("function loadPlyr"), "missing loadPlyr() helper");
+        assert!(html.contains("plyrLoaderPromise"), "missing plyr promise cache");
+        // CDN URLs are referenced as JS string constants used at runtime.
+        assert!(
+            html.contains("https://cdn.plyr.io/3.8.4/plyr.js"),
+            "missing Plyr JS CDN URL"
+        );
+        assert!(
+            html.contains("https://cdn.plyr.io/3.8.4/plyr.css"),
+            "missing Plyr CSS CDN URL"
+        );
+        // Crucially: NO eager <script src=...plyr.js...> or
+        // <link ... href=...plyr.css...> tags in the static HTML markup —
+        // those would defeat the whole point of lazy loading.
+        assert!(
+            !html.contains("<script src=\"https://cdn.plyr.io"),
+            "Plyr JS must not be loaded via static <script> tag"
+        );
+        assert!(
+            !html.contains("<link rel=\"stylesheet\" href=\"https://cdn.plyr.io"),
+            "Plyr CSS must not be loaded via static <link> tag"
+        );
+        // The video preview path uses Plyr to enhance the <video> element,
+        // and closeModal must tear it down.
+        assert!(html.contains("new Plyr("), "missing Plyr() constructor call");
+        assert!(html.contains("currentPlyr"), "missing currentPlyr instance handle");
+        assert!(html.contains("currentPlyr.destroy()"), "missing Plyr destroy on close");
+        // CSS rules sizing the .plyr wrapper inside the modal must be present.
+        assert!(html.contains(".modal .plyr"), "missing .modal .plyr CSS rule");
+    }
+
+    /// CDN reachability is not guaranteed (offline LANs, blocked regions,
+    /// captive portals). The native <video controls autoplay playsinline>
+    /// is rendered immediately and stays functional regardless of whether
+    /// Plyr ever loads — that IS the fallback. This test pins the four
+    /// safety nets that make the fallback robust:
+    ///   1. A hard timeout on script load (TCP black-holes never fire onerror).
+    ///   2. A session-level `plyrUnavailable` flag so subsequent previews
+    ///      skip the wait once we know the CDN is dead.
+    ///   3. A try/catch around `new Plyr(...)` — even a successfully-loaded
+    ///      Plyr can throw on construction (corrupted response, browser
+    ///      quirk) and that must not break playback.
+    ///   4. A user-visible toast on first failure so the degraded mode
+    ///      isn't silent.
+    #[test]
+    fn plyr_falls_back_to_native_on_cdn_failure() {
+        let html = index_html();
+        // (1) Hard timeout — the constant and the setTimeout that uses it.
+        assert!(
+            html.contains("PLYR_LOAD_TIMEOUT_MS"),
+            "missing PLYR_LOAD_TIMEOUT_MS — CDN black-hole would hang preview forever"
+        );
+        assert!(
+            html.contains("Plyr load timed out"),
+            "missing timeout rejection message in loadPlyr"
+        );
+        // (2) Session-level skip flag.
+        assert!(
+            html.contains("plyrUnavailable"),
+            "missing plyrUnavailable session flag"
+        );
+        assert!(
+            html.contains("if (plyrUnavailable)"),
+            "must skip loadPlyr() when plyrUnavailable is set"
+        );
+        // (3) Constructor wrapped in try/catch.
+        assert!(
+            html.contains("try {\n            currentPlyr = new Plyr"),
+            "new Plyr() construction must be wrapped in try/catch"
+        );
+        // (4) User notification on first failure (info toast).
+        assert!(
+            html.contains("Enhanced player unavailable"),
+            "missing fallback toast message"
+        );
+        assert!(html.contains(".toast-info"), "missing .toast-info CSS rule");
+        // The native <video> element renders unconditionally — it's the
+        // pre-Plyr placeholder AND the fallback. We mark the modal content
+        // with data-fallback so future code (and tests) can disambiguate.
+        assert!(
+            html.contains("mc.dataset.fallback"),
+            "missing fallback marker on modal content"
+        );
+        // The catch handler must not call any Plyr API on the dead instance.
+        assert!(
+            !html.contains(".catch(function() {\n        // Native <video>"),
+            "old silent .catch is gone — must surface failure"
+        );
+    }
+
+    /// Review fixes:
+    ///
+    /// #1 (DOM leak): When `loadPlyr` rejects, the injected <script> node
+    /// must be removed from <head>. Otherwise a retry stacks duplicate
+    /// nodes and the late-arriving onload of the original could fire after
+    /// `settled=true`, leaving `window.Plyr` injected without our knowledge.
+    ///
+    /// #5 (stale comments): The boost-rate constant is 3, not 2. The
+    /// comments must not contradict the constant — they should either say
+    /// "BOOST_RATE×" or just describe behaviour without naming the number.
+    ///
+    /// #11 (over-broad CSS): `.modal .plyr *` overrides Plyr's own
+    /// `touch-action: none` on `.plyr__progress`, breaking touch-drag seek
+    /// on mobile. The selector must target only the surfaces the user can
+    /// long-press to boost (video + wrapper + poster + overlaid play btn),
+    /// NOT every descendant.
+    #[test]
+    fn review_fixes_pinned() {
+        let html = index_html();
+
+        // #1 — The fail() path tears down the <script> tag and nulls its
+        // handlers. Without this the next preview would inject a second
+        // <script>, and a delayed onload of the first could still set
+        // window.Plyr without our knowledge.
+        assert!(
+            html.contains("function detachScript"),
+            "fail() must remove the <script> tag — see review item #1"
+        );
+        assert!(
+            html.contains("script.parentNode.removeChild(script)"),
+            "fail() must explicitly removeChild the script node"
+        );
+        assert!(
+            html.contains("script.onload = null"),
+            "fail() must null script.onload to ignore late-arriving loads"
+        );
+
+        // #5 — No "2×" lingering in JS comments. The string "BOOST_RATE"
+        // should still be the source of truth.
+        // (We allow "2" as a digit anywhere — that appears in countless
+        // unrelated places. We specifically forbid the literal "2×" since
+        // its only previous use was the stale gesture comments.)
+        assert!(
+            !html.contains("2×"),
+            "stale '2×' comment found — gesture is now BOOST_RATE×, see review #5"
+        );
+        assert!(
+            !html.contains("hold-to-2"),
+            "stale 'hold-to-2' CSS comment found, see review #5"
+        );
+
+        // #11 — The overly-broad `.modal .plyr *` rule is gone, replaced
+        // by a narrow selector that lists the exact surfaces.
+        assert!(
+            !html.contains(".modal .plyr *"),
+            "over-broad `.modal .plyr *` selector breaks Plyr progress-bar touch — see review #11"
+        );
+        assert!(
+            html.contains(".modal .plyr__video-wrapper"),
+            "narrow selector for hold-to-speed-up surfaces missing — see review #11"
+        );
+        assert!(
+            html.contains(".modal .plyr__poster"),
+            "poster overlay missing from narrow touch-action selector — see review #11"
+        );
+        assert!(
+            html.contains(".modal .plyr__control--overlaid"),
+            "overlaid play button missing from narrow touch-action selector — see review #11"
+        );
+    }
+
+    /// Long-press the right half of the video to play at 2× speed. The gesture
+    /// is hand-rolled on top of Plyr's `player.speed` API. This test pins the
+    /// key wiring: the helper exists, it's hooked into the Plyr factory, the
+    /// cleanup function is invoked on close, and the indicator CSS is shipped.
+    #[test]
+    fn hold_to_speed_up_is_wired() {
+        let html = index_html();
+        // The gesture helper and the tracked cleanup handle.
+        assert!(
+            html.contains("function attachHoldToSpeedUp"),
+            "missing attachHoldToSpeedUp helper"
+        );
+        assert!(
+            html.contains("currentPlyrCleanup"),
+            "missing cleanup handle on Plyr instance"
+        );
+        // Helper is invoked on Plyr's `ready` event — `elements.container` is
+        // not available synchronously after `new Plyr()`. Binding eagerly was
+        // bug #1 of this gesture.
+        assert!(
+            html.contains("playerForGesture.on('ready'"),
+            "attachHoldToSpeedUp must be deferred to Plyr's ready event"
+        );
+        assert!(
+            html.contains("attachHoldToSpeedUp(playerForGesture)"),
+            "ready handler must call attachHoldToSpeedUp(player)"
+        );
+        // Listeners must be on `.plyr` container (player.elements.container),
+        // NOT on the bare <video>. Plyr stacks poster/play/controls overlays
+        // as siblings of <video>, so events on those would never reach a
+        // <video>-bound listener. Binding to <video> was bug #2.
+        assert!(
+            html.contains("player.elements"),
+            "gesture must use player.elements.container, not the bare <video>"
+        );
+        assert!(
+            html.contains("container.addEventListener('pointerdown'"),
+            "pointerdown must be on the .plyr container"
+        );
+        // Cleanup must run when the modal closes / the video preview switches.
+        // It appears at least three times: re-entry replace + ready-handler
+        // replace + closeModal.
+        let cleanup_calls = html.matches("currentPlyrCleanup()").count();
+        assert!(
+            cleanup_calls >= 3,
+            "expected ≥3 currentPlyrCleanup() call sites (replace + ready-replace + close), got {cleanup_calls}"
+        );
+        // The gesture sets player.speed to a boost rate and restores it.
+        assert!(html.contains("player.speed"), "missing player.speed assignment");
+        assert!(html.contains("BOOST_RATE"), "missing BOOST_RATE constant");
+        // Pointer Events unify mouse + touch + pen.
+        assert!(html.contains("pointerdown"), "missing pointerdown handler");
+        assert!(html.contains("pointerup"), "missing pointerup handler");
+        // Indicator element + its CSS class (shown during boost).
+        assert!(
+            html.contains("plyr-speed-indicator"),
+            "missing speed indicator class"
+        );
+        assert!(
+            html.contains(".plyr-speed-indicator"),
+            "missing speed indicator CSS rule"
+        );
+        // touch-action: manipulation suppresses iOS double-tap-zoom and the
+        // long-press save-image callout that would otherwise eat the gesture.
+        assert!(
+            html.contains("touch-action: manipulation"),
+            "missing touch-action override that disables native long-press menus"
+        );
+    }
+
     #[test]
     fn error_html_contains_status_code() {
         let html = error_html(404, "Not Found", "The page was not found");
