@@ -11,7 +11,9 @@ Browse directories, preview media files, and share links — all from your termi
 
 ## Features
 
-- **Single Binary** — ~1.4 MB executable, no runtime dependencies
+- **Single Binary** — Tiny footprint, zero runtime dependencies, ready to use out of the box, blazing-fast startup
+- **Cross-Platform** — Pre-built binaries for Linux (AMD64/ARM64), macOS (Intel/Apple Silicon), and Windows (AMD64); identical experience on every OS and architecture
+- **Use Cases** — File sharing across teams and friends; seamless interconnection between PC, phone, and tablet; lightweight NAS for managing files and streaming movies on the big screen
 - **Directory Browsing** — Modern web UI with breadcrumb navigation
 - **Media Preview** — Play video/audio and view images directly in the browser (gallery mode with swipe/keyboard navigation)
 - **Shareable Links** — Copy file links and QR codes for external players (VLC, mpv, etc.)
