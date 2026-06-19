@@ -5,27 +5,20 @@
 
 [中文文档](README_cn.md)
 
-A lightweight, single-binary file server written in Rust.
+**Share, stream, mount — one binary does it all.**
 
-Browse directories, preview media files, and share links — all from your terminal. With full read-write WebDAV support, mount your shared directory as a network drive on desktop, phone, or tablet — access and manage your files seamlessly from any device.
+EchoFS is a lightweight HTTP file server written in Rust: it turns any directory into a tiny site with a modern web UI — preview media on the fly, share files via copyable links and QR codes — and exposes the same directory over read-write WebDAV, so you can mount it as a network drive in Finder, Explorer, or your phone's file manager.
 
 ## Features
 
-- **Single Binary** — Tiny footprint, zero runtime dependencies, ready to use out of the box, blazing-fast startup
-- **Cross-Platform** — Pre-built binaries for Linux (AMD64/ARM64), macOS (Intel/Apple Silicon), and Windows (AMD64); identical experience on every OS and architecture
-- **Use Cases** — File sharing across teams and friends; seamless interconnection between PC, phone, and tablet; lightweight NAS for managing files and streaming movies on the big screen
-- **Directory Browsing** — Modern web UI with breadcrumb navigation
-- **Media Preview** — Play video/audio and view images directly in the browser (gallery mode with swipe/keyboard navigation)
-- **Shareable Links** — Copy file links and QR codes for external players (VLC, mpv, etc.)
-- **Range Requests** — Video seeking and resumable downloads via HTTP 206
-- **Sortable File List** — Sort by name, size, created/modified time
-- **Multiple Themes** — Classic, Liquid Glass (iOS 26-style frosted glass), and Cartoon (comic-style), each with light/dark mode
-- **Responsive Design** — Card layout on mobile, table on desktop
-- **Web File Management** — Upload, rename, and delete files directly from the browser (powered by WebDAV)
-- **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default
-- **Depth Limiting** — Restrict browsing depth with `--max-depth`
+- **Single Binary** — Tiny footprint, zero runtime dependencies, blazing-fast startup
+- **Cross-Platform** — Pre-built binaries for Linux (AMD64/ARM64), macOS (Intel/Apple Silicon), Windows (AMD64); identical experience everywhere
+- **Use Cases** — File sharing across teams and friends; seamless PC / phone / tablet interconnection; lightweight NAS for managing files and streaming movies on the big screen
+- **Web UI** — Built-in modern responsive web UI with breadcrumb navigation, list/grid views, and sortable columns. Preview images (gallery mode with swipe/keyboard navigation), play audio and video in the browser; video supports a YouTube/Bilibili-style long-press for 3× speed playback. Share files via copyable links or QR codes. Manage files directly in the browser (upload, rename, delete, move, and more). Three distinctive themes to swap between, each with light/dark mode
+- **WebDAV (Read-Write)** — Mount as a network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
+- **HTTP Range** — Video seeking and resumable downloads via HTTP 206
+- **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`
 - **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
-- **WebDAV (Read-Write)** — Mount as network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
 - **Access Logging** — Log to stdout, file, or disable entirely
 
 ## Quick Start
@@ -206,7 +199,9 @@ echofs/
 │   ├── logging.rs       Access log middleware (stdout, file, or off)
 │   ├── range.rs         HTTP Range request parsing and 206 response builder
 │   ├── directory.rs     Async directory traversal, path safety, hidden file blocking
-│   ├── template.rs      Embedded HTML/CSS/JS single-page application and error pages
+│   ├── template.rs      SPA assembler: concatenates HTML markup with embedded CSS/JS
+│   ├── template.css     Embedded stylesheet (themes, layouts, modals, Plyr overrides)
+│   ├── template.js      Embedded SPA logic (routing, file ops, Plyr lazy loader, 3× boost gesture)
 │   ├── mime_utils.rs    MIME type detection and file icon mapping
 │   ├── error.rs         Unified error type with dual-mode responses (HTML/JSON)
 │   ├── throttle.rs      Per-request speed limiting (token-bucket ThrottledRead wrapper)
@@ -221,7 +216,7 @@ echofs/
 cargo test
 ```
 
-130 tests covering unit tests (each module) and integration tests (full HTTP router via `tower::oneshot`).
+145 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot`.
 
 ## Disclaimer
 
