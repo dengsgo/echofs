@@ -1,11 +1,16 @@
 pub mod cli;
+pub mod config;
 pub mod directory;
 pub mod error;
 pub mod handlers;
 pub mod logging;
 pub mod mime_utils;
+pub mod netinfo;
 pub mod range;
 pub mod server;
 pub mod template;
 pub mod throttle;
 pub mod webdav;
+
+#[cfg(feature = "gui")]
+pub mod gui;

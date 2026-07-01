@@ -48,6 +48,12 @@ pub struct Args {
     /// WebDAV password (used with --webdav-user)
     #[arg(long)]
     pub webdav_pass: Option<String>,
+
+    /// Launch the desktop GUI control panel instead of running headless.
+    /// (Also opened automatically when echofs is started with no arguments.)
+    #[cfg(feature = "gui")]
+    #[arg(long, default_value_t = false)]
+    pub gui: bool,
 }
 
 impl Args {

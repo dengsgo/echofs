@@ -15,6 +15,10 @@ pub enum LogTarget {
     Stdout,
     Off,
     File(Arc<Mutex<std::fs::File>>),
+    /// Broadcast each formatted log line to subscribers (used by the GUI's
+    /// live log panel). Sending is non-blocking; it harmlessly returns `Err`
+    /// when no receivers are currently subscribed.
+    Channel(tokio::sync::broadcast::Sender<String>),
 }
 
 impl LogTarget {
@@ -74,6 +78,10 @@ pub async fn access_log(
         LogTarget::File(file) => {
             let mut f = file.lock().await;
             let _ = writeln!(f, "{}", line);
+        }
+        LogTarget::Channel(tx) => {
+            // Ignore send errors (no active subscribers).
+            let _ = tx.send(line);
         }
     }
 

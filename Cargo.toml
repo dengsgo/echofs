@@ -1,6 +1,6 @@
 [package]
 name = "echofs"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 description = "A Rust file server with browser-based directory browsing and media preview"
 license = "Apache-2.0"
@@ -20,6 +20,16 @@ percent-encoding = "2"
 http-body-util = "0.1"
 open = "5"
 libc = "0.2"
+
+# GUI control panel (optional; enabled via `--features gui`).
+eframe = { version = "0.35", optional = true }
+rfd = { version = "0.17", optional = true }
+qrcode = { version = "0.14", default-features = false, optional = true }
+
+[features]
+default = []
+gui = ["dep:eframe", "dep:rfd", "dep:qrcode"]
+
 
 [dev-dependencies]
 tempfile = "3"

@@ -1209,3 +1209,92 @@ async fn json_response_subdir_includes_webdav_fields() {
     assert_eq!(json["webdav_auth"], false);
     assert!(json["entries"].is_array());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Server lifecycle (real listener + graceful shutdown)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod lifecycle {
+    use echofs::config::ServerConfig;
+    use echofs::logging::LogTarget;
+    use echofs::server;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn test_config(root: std::path::PathBuf) -> ServerConfig {
+        ServerConfig {
+            root,
+            bind: "127.0.0.1".to_string(),
+            port: 0, // OS-assigned ephemeral port
+            show_hidden: false,
+            max_depth: -1,
+            speed_limit: None,
+            webdav: false,
+            webdav_user: None,
+            webdav_pass: None,
+        }
+    }
+
+    /// Issue a raw HTTP/1.0 GET over a real TCP connection and return the
+    /// response text. HTTP/1.0 so the server closes the connection on
+    /// completion, giving us a clean EOF to read to.
+    fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        write!(stream, "GET {} HTTP/1.0\r\nHost: localhost\r\n\r\n", path).expect("write");
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf).expect("read");
+        buf
+    }
+
+    #[tokio::test]
+    async fn server_starts_serves_and_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("hello.txt"), "hi there").unwrap();
+
+        let handle = server::run(test_config(root), LogTarget::Off)
+            .await
+            .expect("server should bind");
+        let addr = handle.local_addr;
+
+        // Port 0 must resolve to a real assigned port.
+        assert_ne!(addr.port(), 0, "ephemeral port should be assigned");
+
+        // A blocking socket read can't run on the async worker without
+        // stalling the runtime, so do the request on a blocking thread.
+        let body = tokio::task::spawn_blocking(move || http_get(addr, "/hello.txt"))
+            .await
+            .unwrap();
+        assert!(body.contains("200 OK"), "expected 200, got:\n{}", body);
+        assert!(body.contains("hi there"), "expected file body, got:\n{}", body);
+
+        // Graceful shutdown completes.
+        handle.stop().await;
+
+        // After shutdown the port should no longer accept connections.
+        assert!(
+            TcpStream::connect(addr).is_err(),
+            "server should refuse connections after stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_failure_returns_error_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        // Bind a first server to an ephemeral port…
+        let first = server::run(test_config(root.clone()), LogTarget::Off)
+            .await
+            .expect("first bind ok");
+        let used_port = first.local_addr.port();
+
+        // …then try to bind a second to the same port → should Err, not panic/exit.
+        let mut cfg = test_config(root);
+        cfg.port = used_port;
+        let result = server::run(cfg, LogTarget::Off).await;
+        assert!(result.is_err(), "binding an in-use port should fail");
+
+        first.stop().await;
+    }
+}

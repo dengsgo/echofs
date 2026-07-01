@@ -1,75 +1,41 @@
 use clap::Parser;
-use echofs::{cli, handlers::AppState, logging, server};
+use echofs::config::ServerConfig;
+use echofs::{cli, logging, netinfo, server};
 use cli::Args;
 use std::net::IpAddr;
 
-fn get_local_ips() -> Vec<IpAddr> {
-    let mut ips = Vec::new();
-    if let Ok(ifaces) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        // Probe trick: connect to a public address to find the default route IP.
-        // This doesn't actually send traffic.
-        let _ = ifaces.connect("8.8.8.8:80");
-        if let Ok(local_addr) = ifaces.local_addr() {
-            ips.push(local_addr.ip());
-        }
-    }
+fn main() {
+    let args = Args::parse();
 
-    // Also enumerate all interfaces via getifaddrs on unix
-    #[cfg(unix)]
+    // In a GUI-enabled build, launch the desktop control panel when explicitly
+    // requested with --gui, or when echofs is started with no arguments at all
+    // (e.g. double-clicked). Any CLI arguments → headless server, as before.
+    #[cfg(feature = "gui")]
     {
-        use std::ffi::CStr;
-        use std::net::{Ipv4Addr, Ipv6Addr};
-
-        unsafe extern "C" {
-            fn getifaddrs(ifap: *mut *mut libc::ifaddrs) -> libc::c_int;
-            fn freeifaddrs(ifa: *mut libc::ifaddrs);
-        }
-
-        unsafe {
-            let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
-            if getifaddrs(&mut ifap) == 0 {
-                let mut cursor = ifap;
-                while !cursor.is_null() {
-                    let ifa = &*cursor;
-                    if !ifa.ifa_addr.is_null() {
-                        let family = (*ifa.ifa_addr).sa_family as libc::c_int;
-                        let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
-                        // Skip loopback
-                        if name != "lo" && name != "lo0" {
-                            if family == libc::AF_INET {
-                                let addr = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                                let ip = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
-                                let ip = IpAddr::V4(ip);
-                                if !ip.is_loopback() && !ips.contains(&ip) {
-                                    ips.push(ip);
-                                }
-                            } else if family == libc::AF_INET6 {
-                                let addr = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
-                                let ip = Ipv6Addr::from(addr.sin6_addr.s6_addr);
-                                let ip = IpAddr::V6(ip);
-                                if !ip.is_loopback() && !ips.contains(&ip) {
-                                    ips.push(ip);
-                                }
-                            }
-                        }
-                    }
-                    cursor = ifa.ifa_next;
-                }
-                freeifaddrs(ifap);
-            }
+        let no_args = std::env::args_os().count() <= 1;
+        if args.gui || no_args {
+            echofs::gui::launch(args);
+            return;
         }
     }
 
-    ips
+    run_headless(args);
 }
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-    let root = args.root_path();
-    let addr = args.bind_addr();
+/// Run the server headlessly (classic CLI behavior). Builds a Tokio runtime
+/// manually rather than via `#[tokio::main]` so that the GUI path is free to
+/// own the main thread (required by native windowing on macOS).
+fn run_headless(args: Args) {
+    let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+        eprintln!("Failed to start async runtime: {}", e);
+        std::process::exit(1);
+    });
 
-    println!(r#"
+    runtime.block_on(async move {
+        let config = ServerConfig::from(&args);
+        let log_target = logging::LogTarget::from_arg(&args.log);
+
+        println!(r#"
   ______
  | ____  \
  |      \_\________      ___      _          ___  ___
@@ -78,57 +44,56 @@ async fn main() {
  |          / / /  |    |___\__||_||_|\___/ |_|  |___/
  |_________________|    v{}
 "#, env!("CARGO_PKG_VERSION"));
-    println!("Serving {} on http://{}", root.display(), addr);
 
-    if args.bind == "0.0.0.0" || args.bind == "::" {
-        println!("Available on:");
-        println!("  http://127.0.0.1:{}", args.port);
-        for ip in get_local_ips() {
-            match ip {
-                IpAddr::V6(v6) => println!("  http://[{}]:{}", v6, args.port),
-                _ => println!("  http://{}:{}", ip, args.port),
+        // Start the server (binds the listener). On failure, report and exit.
+        let handle = match server::run(config.clone(), log_target).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("Failed to start server on {}: {}", config.bind_addr(), e);
+                std::process::exit(1);
+            }
+        };
+
+        let port = handle.local_addr.port();
+        println!("Serving {} on http://{}:{}", config.root.display(), config.bind, port);
+
+        if config.is_wildcard_bind() {
+            println!("Available on:");
+            println!("  http://127.0.0.1:{}", port);
+            for ip in netinfo::local_ips() {
+                match ip {
+                    IpAddr::V6(v6) => println!("  http://[{}]:{}", v6, port),
+                    _ => println!("  http://{}:{}", ip, port),
+                }
             }
         }
-    }
 
-    let log_target = logging::LogTarget::from_arg(&args.log);
-    let speed_limit = args.speed_limit_bytes();
+        if let Some(limit) = config.speed_limit {
+            let display = if limit >= 1024 * 1024 * 1024 {
+                format!("{:.1} GB/s", limit as f64 / (1024.0 * 1024.0 * 1024.0))
+            } else if limit >= 1024 * 1024 {
+                format!("{:.1} MB/s", limit as f64 / (1024.0 * 1024.0))
+            } else if limit >= 1024 {
+                format!("{:.1} KB/s", limit as f64 / 1024.0)
+            } else {
+                format!("{} B/s", limit)
+            };
+            println!("Speed limit: {} per request", display);
+        }
 
-    if let Some(limit) = speed_limit {
-        let display = if limit >= 1024 * 1024 * 1024 {
-            format!("{:.1} GB/s", limit as f64 / (1024.0 * 1024.0 * 1024.0))
-        } else if limit >= 1024 * 1024 {
-            format!("{:.1} MB/s", limit as f64 / (1024.0 * 1024.0))
-        } else if limit >= 1024 {
-            format!("{:.1} KB/s", limit as f64 / 1024.0)
-        } else {
-            format!("{} B/s", limit)
-        };
-        println!("Speed limit: {} per request", display);
-    }
+        if !config.webdav {
+            println!("WebDAV: disabled");
+        } else if let Some(user) = config.webdav_user.as_deref() {
+            println!("WebDAV: enabled (auth required, user: {})", user);
+        }
 
-    let webdav = !args.no_webdav;
+        if args.open {
+            let url = format!("http://127.0.0.1:{}", port);
+            let _ = open::that(&url);
+        }
 
-    if args.no_webdav {
-        println!("WebDAV: disabled");
-    } else if args.webdav_user.is_some() {
-        println!("WebDAV: enabled (auth required, user: {})", args.webdav_user.as_deref().unwrap_or(""));
-    }
+        println!("Listening on {}", handle.local_addr);
 
-    if args.open {
-        let url = format!("http://127.0.0.1:{}", args.port);
-        let _ = open::that(&url);
-    }
-
-    let state = AppState {
-        root,
-        show_hidden: args.show_hidden,
-        max_depth: args.max_depth,
-        speed_limit,
-        webdav,
-        webdav_user: args.webdav_user,
-        webdav_pass: args.webdav_pass,
-    };
-
-    server::run(state, &addr, log_target).await;
+        handle.wait().await;
+    });
 }
