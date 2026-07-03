@@ -1297,4 +1297,244 @@ mod lifecycle {
 
         first.stop().await;
     }
+
+    /// Regression: a heavily throttled in-flight download must not make
+    /// `stop()` hang. Before the fix, axum's graceful shutdown waited for the
+    /// slow connection task to finish streaming (hours at 1 KB/s), so `stop()`
+    /// — and thus the GUI thread that awaited it — froze. `stop()` must now be
+    /// bounded and return promptly.
+    #[tokio::test]
+    async fn stop_does_not_hang_with_throttled_inflight_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        // ~512 KB at 1 KB/s ≈ 8.5 minutes to drain — far longer than any
+        // acceptable shutdown wait.
+        std::fs::write(root.join("big.bin"), vec![b'x'; 512 * 1024]).unwrap();
+
+        let mut cfg = test_config(root);
+        cfg.speed_limit = Some(1024); // 1 KB/s
+        let handle = server::run(cfg, LogTarget::Off).await.expect("bind");
+        let addr = handle.local_addr;
+
+        // Open a connection and read only the first few bytes, leaving the
+        // throttled body streaming in flight. Keep the stream alive for the
+        // duration of the test by moving it into the blocking task.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let inflight = tokio::task::spawn_blocking(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            write!(stream, "GET /big.bin HTTP/1.0\r\nHost: localhost\r\n\r\n").expect("write");
+            let mut one = [0u8; 1];
+            let _ = stream.read(&mut one); // block until first throttled byte
+            let _ = started_tx.send(());
+            // Hold the connection open briefly so it is genuinely in-flight
+            // while we call stop().
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(stream);
+        });
+
+        // Ensure the request is actually being served before stopping.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx).await;
+
+        // The whole point: stop() must return well before the body could drain.
+        let stop_result =
+            tokio::time::timeout(std::time::Duration::from_secs(8), handle.stop()).await;
+        assert!(
+            stop_result.is_ok(),
+            "stop() hung with a throttled in-flight request"
+        );
+
+        // Port must be released after stop.
+        assert!(
+            TcpStream::connect(addr).is_err(),
+            "server should refuse connections after stop"
+        );
+
+        let _ = inflight.await;
+    }
+
+    /// Regression mirroring the GUI window-close path: the GUI calls
+    /// `handle.abort()` and then drops its `Arc<Runtime>` on the main thread.
+    /// Neither step may block on an orphaned throttled connection task
+    /// (axum detaches connection tasks, so aborting the serve task does not
+    /// cancel an in-flight download). This test builds a real runtime like the
+    /// GUI does (not `#[tokio::test]`), starts a throttled transfer, then times
+    /// `abort()` + runtime drop.
+    #[test]
+    fn gui_close_path_abort_then_runtime_drop_is_fast() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'x'; 512 * 1024]).unwrap();
+
+        let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+        let mut cfg = test_config(root);
+        cfg.speed_limit = Some(1024); // 1 KB/s
+
+        let handle = rt
+            .block_on(server::run(cfg, LogTarget::Off))
+            .expect("bind");
+        let addr = handle.local_addr;
+
+        // Kick off an in-flight throttled request from a plain OS thread.
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let inflight = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            write!(stream, "GET /big.bin HTTP/1.0\r\nHost: localhost\r\n\r\n").expect("write");
+            let mut one = [0u8; 1];
+            let _ = stream.read(&mut one); // first throttled byte
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let _ = started_rx.recv_timeout(Duration::from_secs(5));
+
+        // The GUI Stop / on_exit path: synchronous abort must be instant.
+        let t0 = Instant::now();
+        handle.abort();
+        let abort_elapsed = t0.elapsed();
+        assert!(
+            abort_elapsed < Duration::from_secs(1),
+            "abort() took {:?} — should be instant",
+            abort_elapsed
+        );
+
+        // Then dropping the runtime (EchoApp drop on window close) must not
+        // block on the orphaned throttled connection task.
+        let t1 = Instant::now();
+        drop(rt);
+        let drop_elapsed = t1.elapsed();
+        assert!(
+            drop_elapsed < Duration::from_secs(3),
+            "runtime drop took {:?} — hung on the in-flight throttled task",
+            drop_elapsed
+        );
+
+        let _ = inflight.join();
+    }
+
+    /// Regression for the GUI Stop→Start cycle on a fixed port: after aborting
+    /// with a throttled request in flight, restarting on the *same* port must
+    /// succeed (the listener socket is released promptly, not stuck because an
+    /// orphaned connection task lingers).
+    #[test]
+    fn restart_same_port_after_abort_with_inflight() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'x'; 512 * 1024]).unwrap();
+
+        let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+        // First bind on an ephemeral port to discover a free port number, then
+        // reuse that exact port for the restart.
+        let mut cfg = test_config(root.clone());
+        cfg.speed_limit = Some(1024);
+        let handle = rt.block_on(server::run(cfg, LogTarget::Off)).expect("bind 1");
+        let port = handle.local_addr.port();
+        let addr = handle.local_addr;
+
+        // In-flight throttled request.
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let inflight = std::thread::spawn(move || {
+            if let Ok(mut stream) = TcpStream::connect(addr) {
+                let _ = write!(stream, "GET /big.bin HTTP/1.0\r\nHost: localhost\r\n\r\n");
+                let mut one = [0u8; 1];
+                let _ = stream.read(&mut one);
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_secs(2));
+                drop(stream);
+            }
+        });
+        let _ = started_rx.recv_timeout(Duration::from_secs(5));
+
+        // Stop (abort), then immediately restart on the same fixed port.
+        handle.abort();
+
+        let mut cfg2 = test_config(root);
+        cfg2.port = port;
+        cfg2.speed_limit = Some(1024);
+
+        // Retry briefly: the OS may need a moment to release the socket.
+        let mut restart = None;
+        for _ in 0..20 {
+            match rt.block_on(server::run(cfg2.clone(), LogTarget::Off)) {
+                Ok(h) => {
+                    restart = Some(h);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        assert!(
+            restart.is_some(),
+            "could not rebind port {} after abort with in-flight request",
+            port
+        );
+
+        restart.unwrap().abort();
+        drop(rt);
+        let _ = inflight.join();
+    }
+
+    /// After the GUI Stop button (`abort()` with the runtime still alive), the
+    /// orphaned throttled connection task must be harmless: the port is freed
+    /// immediately and a fresh server can bind and serve on a new port. This
+    /// documents that Stop does not leave the app in a broken state even though
+    /// the in-flight connection task lingers until its client disconnects.
+    #[test]
+    fn server_usable_again_after_abort_with_lingering_connection() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'x'; 512 * 1024]).unwrap();
+        std::fs::write(root.join("small.txt"), "second server ok").unwrap();
+
+        let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+        let mut cfg = test_config(root.clone());
+        cfg.speed_limit = Some(1024);
+        let handle = rt.block_on(server::run(cfg, LogTarget::Off)).expect("bind 1");
+        let addr1 = handle.local_addr;
+
+        // Leave a throttled request in flight and DON'T close it (the client
+        // keeps holding the socket, so the orphaned task would keep streaming).
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let keepalive = std::thread::spawn(move || {
+            if let Ok(mut stream) = TcpStream::connect(addr1) {
+                let _ = write!(stream, "GET /big.bin HTTP/1.0\r\nHost: localhost\r\n\r\n");
+                let mut one = [0u8; 1];
+                let _ = stream.read(&mut one);
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_secs(3));
+                drop(stream);
+            }
+        });
+        let _ = started_rx.recv_timeout(Duration::from_secs(5));
+
+        handle.abort();
+
+        // A brand-new server on a fresh ephemeral port must work normally.
+        let handle2 = rt
+            .block_on(server::run(test_config(root), LogTarget::Off))
+            .expect("bind 2");
+        let addr2 = handle2.local_addr;
+        assert_ne!(addr1.port(), addr2.port());
+
+        let body = std::thread::spawn(move || http_get(addr2, "/small.txt"))
+            .join()
+            .unwrap();
+        assert!(body.contains("200 OK"), "second server should serve; got:\n{}", body);
+        assert!(body.contains("second server ok"));
+
+        handle2.abort();
+        drop(rt);
+        let _ = keepalive.join();
+    }
 }

@@ -1,3 +1,11 @@
+// On Windows, a GUI-enabled build targets the "windows" subsystem so that
+// double-clicking the .exe (the desktop-app launch path) does not spawn a
+// console window alongside the egui window. When such a build is instead run
+// from a terminal with CLI args (the headless path), `attach_parent_console`
+// below re-attaches to the calling console so server output stays visible.
+// The default (no-gui) build keeps the console subsystem and is unaffected.
+#![cfg_attr(all(target_os = "windows", feature = "gui"), windows_subsystem = "windows")]
+
 use clap::Parser;
 use echofs::config::ServerConfig;
 use echofs::{cli, logging, netinfo, server};
@@ -22,10 +30,33 @@ fn main() {
     run_headless(args);
 }
 
+/// When a `windows_subsystem = "windows"` build is launched from a terminal
+/// (the headless path), Windows gives it no console, so `println!`/`eprintln!`
+/// output would be lost. Re-attach to the parent process's console if it has
+/// one; this is a no-op failure when there is none (e.g. a double-click launch),
+/// which is exactly when we want no console. Only compiled for the gui build on
+/// Windows — the case where `windows_subsystem = "windows"` is actually set.
+#[cfg(all(target_os = "windows", feature = "gui"))]
+fn attach_parent_console() {
+    // ATTACH_PARENT_PROCESS (DWORD)-1: attach to the console of the parent.
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    unsafe extern "system" {
+        fn AttachConsole(dwProcessId: u32) -> i32;
+    }
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 /// Run the server headlessly (classic CLI behavior). Builds a Tokio runtime
 /// manually rather than via `#[tokio::main]` so that the GUI path is free to
 /// own the main thread (required by native windowing on macOS).
 fn run_headless(args: Args) {
+    // In a windows-subsystem build (gui feature on Windows) the process starts
+    // without a console; reattach the parent terminal's so CLI output shows.
+    #[cfg(all(target_os = "windows", feature = "gui"))]
+    attach_parent_console();
+
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
         eprintln!("Failed to start async runtime: {}", e);
         std::process::exit(1);

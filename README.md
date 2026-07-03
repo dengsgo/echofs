@@ -15,7 +15,7 @@ EchoFS is a lightweight HTTP file server written in Rust: it turns any directory
 - **Cross-Platform** — Pre-built binaries for Linux (AMD64/ARM64), macOS (Intel/Apple Silicon), Windows (AMD64); identical experience everywhere
 - **Use Cases** — File sharing across teams and friends; seamless PC / phone / tablet interconnection; lightweight NAS for managing files and streaming movies on the big screen
 - **Web UI** — Built-in modern responsive web UI with breadcrumb navigation, list/grid views, and sortable columns. Preview images (gallery mode with swipe/keyboard navigation), play audio and video in the browser; video supports a YouTube/Bilibili-style long-press for 3× speed playback. Share files via copyable links or QR codes. Manage files directly in the browser (upload, rename, delete, move, and more). Three distinctive themes to swap between, each with light/dark mode
-- **Desktop GUI** *(optional)* — A native control panel (egui) to configure and run the server without the command line: pick a directory, set port/bind, toggle options, start/stop, watch a live access log, and copy/open/QR-share the LAN addresses. Opt-in at build time with `--features gui`; see [Desktop GUI](#desktop-gui)
+- **Desktop GUI** *(optional)* — A native control panel (egui) to configure and run the server without the command line: pick a directory, set port/bind, toggle options, start/stop, watch a live access log, and copy/open/QR-share the LAN addresses. Bilingual UI (English / 中文) that auto-detects your system language. Opt-in at build time with `--features gui`; see [Desktop GUI](#desktop-gui)
 - **WebDAV (Read-Write)** — Mount as a network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
 - **HTTP Range** — Video seeking and resumable downloads via HTTP 206
 - **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`
@@ -175,6 +175,7 @@ In a GUI-enabled build, running `echofs` with **no arguments** (e.g. double-clic
 - **Start / stop** the server with a status indicator; configuration fields lock while running and a bind failure (e.g. port in use) is reported inline instead of crashing
 - **Share** — the LAN addresses the server is reachable on are listed live, each with **Copy**, **Open in browser**, and **QR code** buttons
 - **Live access log** — requests stream into a scrolling panel in real time
+- **Bilingual UI** — English and 简体中文, auto-selected from your system language on launch and switchable any time from the language menu in the header
 
 > The GUI feature pulls in `eframe`, `rfd`, and `qrcode`. These are compiled **only** when `--features gui` is set; the default build does not include them.
 
@@ -282,7 +283,7 @@ echofs/
 cargo test
 ```
 
-147 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown).
+151 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown). Building with `--features gui` adds a few more, for 156.
 
 ## Disclaimer
 

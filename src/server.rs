@@ -5,6 +5,7 @@ use axum::middleware::Next;
 use axum::routing::{any, get};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tower_http::cors::CorsLayer;
 
@@ -12,6 +13,12 @@ use crate::config::ServerConfig;
 use crate::handlers::{self, AppState};
 use crate::logging::{self, LogTarget};
 use crate::webdav;
+
+/// How long [`ServerHandle::stop`] waits for in-flight requests to drain before
+/// the server task is forcibly aborted. Bounded so a throttled transfer (e.g.
+/// `--speed-limit 1k`, which can take hours to finish a single response) cannot
+/// make shutdown hang — important for the GUI, which would otherwise freeze.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 /// Error returned when the server fails to start.
 #[derive(Debug)]
@@ -30,9 +37,10 @@ impl std::fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// Handle to a running server. Dropping it does **not** stop the server; call
-/// [`ServerHandle::stop`] for a graceful shutdown, or [`ServerHandle::wait`] to
-/// block until the server task finishes on its own.
+/// Handle to a running server. Dropping it does **not** stop the server. Use
+/// [`ServerHandle::stop`] for a bounded graceful shutdown, [`ServerHandle::abort`]
+/// for an immediate synchronous teardown (safe from a UI thread), or
+/// [`ServerHandle::wait`] to block until the server task finishes on its own.
 pub struct ServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
@@ -42,12 +50,40 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
-    /// Signal graceful shutdown and wait for the server task to finish.
+    /// Signal graceful shutdown and wait for the server task to finish, but
+    /// only up to [`SHUTDOWN_GRACE`]. If in-flight requests haven't drained by
+    /// then (e.g. a heavily throttled download), the task is aborted so the
+    /// caller never blocks indefinitely.
     pub async fn stop(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
-        let _ = self.join.await;
+        match tokio::time::timeout(SHUTDOWN_GRACE, &mut self.join).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Grace period elapsed with requests still in flight; force it.
+                self.join.abort();
+                let _ = (&mut self.join).await;
+            }
+        }
+    }
+
+    /// Immediately abort the server task without waiting for in-flight requests.
+    /// Synchronous, so it is safe to call from a UI thread (e.g. on window
+    /// close) without blocking on a slow drain.
+    ///
+    /// This drops the listener at once, freeing the bound port. Note that axum
+    /// runs each connection on its own detached task that this handle cannot
+    /// reach, so an in-flight response (e.g. a throttled download) is not
+    /// force-cancelled here — that task lingers until its client disconnects or
+    /// the transfer completes. When the whole runtime is dropped afterwards
+    /// (as on GUI window close) those tasks are dropped too.
+    pub fn abort(mut self) {
+        // Best-effort graceful signal first, then drop the listener.
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.join.abort();
     }
 
     /// Block until the server task finishes (e.g. via an external signal or a
