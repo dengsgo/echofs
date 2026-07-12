@@ -428,6 +428,44 @@ async fn api_breadcrumbs() {
     assert_eq!(crumbs[2]["name"], "b");
 }
 
+/// Regression: requesting a directory via a trailing-slash URL (e.g. a browser
+/// refresh on `/sub/`) used to produce `path: "/sub/"` and entry hrefs with a
+/// doubled separator (`/sub//child`). Those doubled slashes then propagated as
+/// the user navigated deeper, making the folder structure look "duplicated".
+/// The server now normalizes the relative path before generating hrefs/path,
+/// so all of `/sub`, `/sub/`, and `/sub//child` return the same clean output.
+#[tokio::test]
+async fn api_trailing_slash_normalizes_hrefs() {
+    let env = TestEnv::new();
+    env.write("sub/inner.txt", "data");
+    env.mkdir("sub/child");
+
+    for uri in ["/sub", "/sub/", "/sub//"] {
+        let json = env.xhr(uri).await.assert_status(StatusCode::OK).json().await;
+        // path is normalized — no trailing slash, no doubled separators.
+        assert_eq!(json["path"], "/sub", "uri={uri} should normalize path");
+        let entries = json["entries"].as_array().unwrap();
+        let by_name: std::collections::HashMap<&str, &serde_json::Value> =
+            entries.iter().map(|e| (e["name"].as_str().unwrap(), e)).collect();
+        // hrefs are clean single-slash paths.
+        assert_eq!(by_name["child"]["href"], "/sub/child", "uri={uri} child href");
+        assert_eq!(by_name["inner.txt"]["href"], "/sub/inner.txt", "uri={uri} file href");
+    }
+}
+
+/// Regression: doubled separators in the *middle* of the request path
+/// (`/a//b`) must also normalize so hrefs don't compound into `/a//b/c`.
+#[tokio::test]
+async fn api_double_slash_in_path_normalizes_hrefs() {
+    let env = TestEnv::new();
+    env.write("a/b/c.txt", "data");
+
+    let json = env.xhr("/a//b").await.assert_status(StatusCode::OK).json().await;
+    assert_eq!(json["path"], "/a/b");
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["href"], "/a/b/c.txt");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AJAX dispatch: same path returns HTML or JSON
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1536,5 +1574,34 @@ mod lifecycle {
         handle2.abort();
         drop(rt);
         let _ = keepalive.join();
+    }
+}
+
+/// Regression: the WebDAV PROPFIND self/directory href must be normalized the
+/// same way child hrefs are. Before the fix, `PROPFIND /sub/` produced a self
+/// href of `/sub//` (and `/sub//` produced `/sub///`). A WebDAV client (e.g.
+/// Windows Explorer) then caches that doubled-slash URL and, on reopen, treats
+/// it as a distinct resource — the folder appears to show itself duplicated.
+/// The self href now collapses doubled/leading/trailing slashes into a single
+/// clean collection href (`/sub/`).
+#[tokio::test]
+async fn webdav_propfind_self_href_normalized() {
+    let env = TestEnv::new().webdav();
+    env.write("sub/inner.txt", "data");
+    env.mkdir("sub/child");
+
+    for uri in ["/sub", "/sub/", "/sub//"] {
+        let body = env.propfind(uri, "1").await.assert_status(StatusCode::MULTI_STATUS).text().await;
+        // The first <D:href> belongs to the requested directory itself.
+        let first_href = body
+            .lines()
+            .find_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("<D:href>").and_then(|s| s.strip_suffix("</D:href>"))
+            })
+            .expect("multistatus must contain a href");
+        assert_eq!(first_href, "/sub/", "uri={uri} self href must be a clean collection href");
+        // No doubled slashes anywhere in the response.
+        assert!(!body.contains("//"), "uri={uri} response must not contain doubled slashes");
     }
 }

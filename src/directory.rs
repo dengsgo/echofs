@@ -173,8 +173,21 @@ pub async fn list_directory(root: &Path, rel_path: &str, show_hidden: bool, max_
 }
 
 fn list_directory_sync(full_path: &Path, rel_path: &str, show_hidden: bool, max_depth: i32) -> Result<DirListing, AppError> {
+    // Normalize: strip leading/trailing slashes and collapse runs of '/' so
+    // that hrefs and the `path` field are clean regardless of how the caller
+    // arrived here (e.g. a browser refresh on `/sub/` would otherwise produce
+    // hrefs like `/sub//child` and a path of `/sub/`, which compounds as the
+    // user navigates deeper). `safe_resolve` already canonicalized the path
+    // against the filesystem, so this is purely cosmetic normalization of the
+    // relative-path string used for display and link generation.
+    let normalized_rel: String = rel_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let rel_path = normalized_rel.as_str();
 
-    let current_depth = path_depth(rel_path.trim_start_matches('/'));
+    let current_depth = path_depth(rel_path);
     let mut entries = Vec::new();
     let rd = std::fs::read_dir(full_path).map_err(AppError::from)?;
 
@@ -465,6 +478,29 @@ mod tests {
         ];
         for (path, expected) in cases {
             assert_eq!(path_depth(path), expected, "path_depth({:?})", path);
+        }
+    }
+
+    // ─── list_directory path normalization ───
+
+    /// Regression: a trailing slash or doubled separator in the request path
+    /// must not leak into the `path` field or the entry `href`s. Before the
+    /// fix, `/sub/` produced `path: "/sub/"` and hrefs like `/sub//child`,
+    /// which compounded as the user navigated deeper (looking like the folder
+    /// structure was being duplicated).
+    #[tokio::test]
+    async fn list_directory_normalizes_trailing_and_doubled_slashes() {
+        let (_tmp, root) = tmp_root();
+        fs::create_dir_all(root.join("sub/child")).unwrap();
+        fs::write(root.join("sub/inner.txt"), "x").unwrap();
+
+        for bad_rel in ["sub/", "sub//", "/sub", "//sub//", "sub///"] {
+            let listing = list_directory(&root, bad_rel, false, -1).await.unwrap();
+            assert_eq!(listing.path, "/sub", "rel={bad_rel:?} path");
+            let child = listing.entries.iter().find(|e| e.name == "child").unwrap();
+            assert_eq!(child.href, "/sub/child", "rel={bad_rel:?} child href");
+            let inner = listing.entries.iter().find(|e| e.name == "inner.txt").unwrap();
+            assert_eq!(inner.href, "/sub/inner.txt", "rel={bad_rel:?} inner href");
         }
     }
 }

@@ -411,6 +411,11 @@
       if (!resp.ok) throw new Error('Failed to load directory');
       const data = await resp.json();
       currentEntries = data.entries;
+      // Trust the server's normalized path over the raw URL — if the user
+      // landed here via a trailing-slash URL (e.g. a refresh on /sub/),
+      // `data.path` is the clean form (/sub) and downstream operations
+      // (upload destination, move-dialog base) won't compound stray slashes.
+      currentPath = data.path || path;
       webdavEnabled = !!data.webdav;
       webdavAuth = !!data.webdav_auth;
       renderBreadcrumbs(data.breadcrumbs);

@@ -638,6 +638,20 @@ async fn handle_propfind_inner(
 ) -> Response<Body> {
     let depth = parse_depth(headers);
 
+    // Normalize the relative path: strip leading/trailing slashes and collapse
+    // runs of '/' so the self href and child hrefs are consistent and clean.
+    // Without this, `PROPFIND /sub/` produced a self href of `/sub//` (and
+    // `/sub//` produced `/sub///`). A WebDAV client then caches that
+    // doubled-slash URL and, on reopen, treats it as a distinct resource —
+    // the folder appears to show itself duplicated. `safe_resolve` already
+    // canonicalizes against the filesystem, so this is purely cosmetic.
+    let normalized_rel: String = rel_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let rel_path = normalized_rel.as_str();
+
     let resolved = match directory::safe_resolve(&state.root, rel_path, state.show_hidden, state.max_depth).await {
         Ok(p) => p,
         Err(e) => return error_to_webdav_response(e),
@@ -649,7 +663,7 @@ async fn handle_propfind_inner(
         let dir_href = if rel_path.is_empty() {
             "/".to_string()
         } else {
-            format!("/{}/", rel_path.trim_start_matches('/'))
+            format!("/{}/", rel_path)
         };
         match dir_resource_props(&resolved, &dir_href).await {
             Ok(res) => resources.push(res),
