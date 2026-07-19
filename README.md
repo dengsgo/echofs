@@ -17,6 +17,7 @@ EchoFS is a lightweight HTTP file server written in Rust: it turns any directory
 - **Web UI** — Built-in modern responsive web UI with breadcrumb navigation, list/grid views, and sortable columns. Preview images (gallery mode with swipe/keyboard navigation), play audio and video in the browser; video supports a YouTube/Bilibili-style long-press for 3× speed playback. Share files via copyable links or QR codes. Manage files directly in the browser (upload, rename, delete, move, and more). Three distinctive themes to swap between, each with light/dark mode
 - **Desktop GUI** *(optional)* — A native control panel (egui) to configure and run the server without the command line: pick a directory, set port/bind, toggle options, start/stop, watch a live access log, and copy/open/QR-share the LAN addresses. Bilingual UI (English / 中文) that auto-detects your system language. Opt-in at build time with `--features gui`; see [Desktop GUI](#desktop-gui)
 - **WebDAV (Read-Write)** — Mount as a network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
+- **Web UI Auth** — By default the browser UI is open even when WebDAV auth is on. Set `--webui-auth` (with `--webdav-user`) to gate browser GET/HEAD access (file downloads, directory listings) behind the same Basic Auth credentials as WebDAV
 - **HTTP Range** — Video seeking and resumable downloads via HTTP 206
 - **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`
 - **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
@@ -101,6 +102,7 @@ Options:
       --no-webdav    Disable WebDAV access [default: enabled]
       --webdav-user <WEBDAV_USER>  WebDAV username (enables Basic Auth for WebDAV access; does not affect web UI)
       --webdav-pass <WEBDAV_PASS>  WebDAV password (used with --webdav-user)
+      --webui-auth   Require the same WebDAV Basic Auth for browser access (file downloads and directory listings). Requires --webdav-user to be set [default: off]
   -l, --log <LOG>    Access log output: "stdout", "off", or a file path [default: stdout]
       --gui          Launch the desktop GUI control panel (gui builds only; also auto-opens when run with no arguments)
   -h, --help         Print help
@@ -135,6 +137,9 @@ echofs --no-webdav
 
 # Require WebDAV authentication (does not affect browser access)
 echofs --webdav-user admin --webdav-pass secret
+
+# Also require login for the browser web UI (file downloads + listings)
+echofs --webdav-user admin --webdav-pass secret --webui-auth
 ```
 
 #### WebDAV
@@ -146,6 +151,8 @@ WebDAV is enabled by default with full read-write support. Mount the served dire
 - **Linux Nautilus**: Connect to Server → `dav://localhost:8080`
 
 When `--webdav-user` and `--webdav-pass` are set, all WebDAV operations (browsing, uploading, deleting, etc.) require Basic Auth. **The web UI file management features (upload/rename/delete) share the same credentials** — users will be prompted to log in when performing these operations.
+
+By default the browser web UI stays open even when WebDAV auth is configured. Pass `--webui-auth` (along with `--webdav-user`) to also gate plain browser access — directory listings and file downloads (GET/HEAD) — behind the same Basic Auth credentials. WebDAV methods themselves remain handled by their own auth checks. `OPTIONS` preflight is always allowed through so CORS still works.
 
 Supported WebDAV methods: `PROPFIND`, `OPTIONS`, `LOCK`, `UNLOCK`, `PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`.
 
@@ -171,7 +178,7 @@ In a GUI-enabled build, running `echofs` with **no arguments** (e.g. double-clic
 
 ### What it does
 
-- **Configure visually** — pick the root directory with a native folder picker; set bind address, port, max depth, and speed limit; toggle hidden files, WebDAV, and auto-open-browser; fill in WebDAV credentials
+- **Configure visually** — pick the root directory with a native folder picker; set bind address, port, max depth, and speed limit; toggle hidden files, WebDAV, and auto-open-browser; fill in WebDAV credentials; optionally require WebDAV login for the browser UI (enabled only when WebDAV is on)
 - **Start / stop** the server with a status indicator; configuration fields lock while running and a bind failure (e.g. port in use) is reported inline instead of crashing
 - **Share** — the LAN addresses the server is reachable on are listed live, each with **Copy**, **Open in browser**, and **QR code** buttons
 - **Live access log** — requests stream into a scrolling panel in real time
