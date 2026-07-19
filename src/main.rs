@@ -15,6 +15,11 @@ use std::net::IpAddr;
 fn main() {
     let args = Args::parse();
 
+    if let Err(msg) = args.validate() {
+        eprintln!("Error: {}", msg);
+        std::process::exit(2);
+    }
+
     // In a GUI-enabled build, launch the desktop control panel when explicitly
     // requested with --gui, or when echofs is started with no arguments at all
     // (e.g. double-clicked). Any CLI arguments → headless server, as before.
@@ -116,6 +121,10 @@ fn run_headless(args: Args) {
             println!("WebDAV: disabled");
         } else if let Some(user) = config.webdav_user.as_deref() {
             println!("WebDAV: enabled (auth required, user: {})", user);
+        }
+
+        if config.webui_auth {
+            println!("Web UI auth: enabled (shares WebDAV credentials)");
         }
 
         if args.open {

@@ -1,6 +1,7 @@
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, Response};
+use axum::extract::State;
+use axum::http::{Method, Request, Response};
 use axum::middleware::Next;
 use axum::routing::{any, get};
 use std::net::SocketAddr;
@@ -105,13 +106,38 @@ async fn dav_headers_middleware(request: Request<Body>, next: Next) -> Response<
     response
 }
 
+/// Middleware that gates browser access (GET/HEAD) behind the same Basic Auth
+/// credentials as WebDAV when `--webui-auth` is enabled. WebDAV methods
+/// (PROPFIND, PUT, …) are left through — those handlers perform their own
+/// `check_auth` and we must not block the initial 401 challenge they emit.
+///
+/// Note: OPTIONS preflight must also pass through unanswered so CORS can reply.
+pub async fn webui_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    if state.webui_auth {
+        let method = request.method().clone();
+        let is_browser_request = matches!(method, Method::GET | Method::HEAD);
+        if is_browser_request {
+            if let Err(resp) = webdav::check_auth(&state, request.headers()) {
+                return resp;
+            }
+        }
+    }
+    next.run(request).await
+}
+
 /// Assemble the Axum router with all middleware layers applied.
 ///
 /// Layer order: last `.layer()` = outermost (processes request first, response
-/// last). We want: request → dav_headers → cors → logging → handler. Auth is
-/// handled inside the WebDAV handlers (does not affect browser/web page access).
+/// last). We want: request → dav_headers → cors → webui_auth → access_log → handler.
+/// WebDAV auth is enforced inside the WebDAV handlers themselves; the webui_auth
+/// middleware additionally gates browser GET/HEAD access when `--webui-auth` is on.
 pub fn build_router(state: Arc<AppState>, log_target: LogTarget) -> Router {
     let webdav = state.webdav;
+    let webui_auth_state = state.clone();
 
     let mut app = Router::new()
         .route("/", get(handlers::serve_index))
@@ -123,22 +149,17 @@ pub fn build_router(state: Arc<AppState>, log_target: LogTarget) -> Router {
             .route("/{*path}", any(webdav::handle_webdav_path));
     }
 
-    if webdav {
-        app.layer(axum::middleware::from_fn_with_state(
-            log_target,
-            logging::access_log,
-        ))
-        .layer(CorsLayer::permissive())
-        .layer(axum::middleware::from_fn(dav_headers_middleware))
-        .with_state(state)
-    } else {
-        app.layer(axum::middleware::from_fn_with_state(
-            log_target,
-            logging::access_log,
-        ))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
-    }
+    app.layer(axum::middleware::from_fn_with_state(
+        log_target,
+        logging::access_log,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        webui_auth_state,
+        webui_auth_middleware,
+    ))
+    .layer(CorsLayer::permissive())
+    .layer(axum::middleware::from_fn(dav_headers_middleware))
+    .with_state(state)
 }
 
 /// Bind the listener and spawn the server task.
@@ -156,6 +177,7 @@ pub async fn run(config: ServerConfig, log_target: LogTarget) -> Result<ServerHa
         webdav: config.webdav,
         webdav_user: config.webdav_user,
         webdav_pass: config.webdav_pass,
+        webui_auth: config.webui_auth,
     });
 
     let app = build_router(state, log_target);

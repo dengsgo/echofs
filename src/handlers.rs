@@ -20,6 +20,7 @@ pub struct AppState {
     pub webdav: bool,
     pub webdav_user: Option<String>,
     pub webdav_pass: Option<String>,
+    pub webui_auth: bool,
 }
 
 /// JSON response wrapper that includes directory listing + server capabilities.

@@ -23,6 +23,7 @@ struct TestEnv {
     webdav: bool,
     webdav_user: Option<String>,
     webdav_pass: Option<String>,
+    webui_auth: bool,
     _tmp: tempfile::TempDir, // prevent cleanup until TestEnv is dropped
 }
 
@@ -31,7 +32,7 @@ impl TestEnv {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, _tmp: tmp }
+        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, _tmp: tmp }
     }
 
     fn show_hidden(mut self) -> Self {
@@ -52,6 +53,11 @@ impl TestEnv {
     fn auth(mut self, user: &str, pass: &str) -> Self {
         self.webdav_user = Some(user.to_string());
         self.webdav_pass = Some(pass.to_string());
+        self
+    }
+
+    fn webui_auth(mut self) -> Self {
+        self.webui_auth = true;
         self
     }
 
@@ -91,6 +97,7 @@ impl TestEnv {
             webdav: self.webdav,
             webdav_user: self.webdav_user.clone(),
             webdav_pass: self.webdav_pass.clone(),
+            webui_auth: self.webui_auth,
         });
         let mut router = Router::new()
             .route("/", get(handlers::serve_index))
@@ -99,6 +106,12 @@ impl TestEnv {
             router = router
                 .route("/", axum::routing::any(echofs::webdav::handle_webdav_root))
                 .route("/{*path}", axum::routing::any(echofs::webdav::handle_webdav_path));
+        }
+        if self.webui_auth {
+            router = router.layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                echofs::server::webui_auth_middleware,
+            ));
         }
         router.with_state(state)
     }
@@ -1249,6 +1262,70 @@ async fn json_response_subdir_includes_webdav_fields() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// --webui-auth: share WebDAV Basic Auth with browser GET/HEAD access
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn webui_auth_blocks_browser_get_without_credentials() {
+    let env = TestEnv::new().webdav().auth("admin", "secret").webui_auth();
+    env.write("file.txt", "hello");
+    env.get("/file.txt").await.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webui_auth_blocks_browser_directory_listing_without_credentials() {
+    let env = TestEnv::new().webdav().auth("admin", "secret").webui_auth();
+    env.write("file.txt", "data");
+    env.get("/").await.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webui_auth_allows_browser_get_with_correct_credentials() {
+    let env = TestEnv::new().webdav().auth("admin", "secret").webui_auth();
+    env.write("file.txt", "hello");
+    let body = env
+        .authed("GET", "/file.txt", "", "admin", "secret")
+        .await
+        .assert_status(StatusCode::OK)
+        .text()
+        .await;
+    assert_eq!(body, "hello");
+}
+
+#[tokio::test]
+async fn webui_auth_rejects_browser_get_with_wrong_credentials() {
+    let env = TestEnv::new().webdav().auth("admin", "secret").webui_auth();
+    env.write("file.txt", "hello");
+    env.authed("GET", "/file.txt", "", "admin", "wrong")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webui_auth_response_includes_challenge_header() {
+    let env = TestEnv::new().webdav().auth("admin", "secret").webui_auth();
+    env.write("file.txt", "data");
+    let resp = env.get("/").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let challenge = resp
+        .0
+        .headers()
+        .get("WWW-Authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(challenge.starts_with("Basic"));
+}
+
+#[tokio::test]
+async fn webui_auth_off_by_default_lets_browser_get_without_credentials() {
+    // --webdav-user alone (without --webui-auth) must not block browser GET.
+    let env = TestEnv::new().webdav().auth("admin", "secret");
+    env.write("file.txt", "hello");
+    let body = env.get("/file.txt").await.assert_status(StatusCode::OK).text().await;
+    assert_eq!(body, "hello");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Server lifecycle (real listener + graceful shutdown)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1270,6 +1347,7 @@ mod lifecycle {
             webdav: false,
             webdav_user: None,
             webdav_pass: None,
+            webui_auth: false,
         }
     }
 

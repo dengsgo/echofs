@@ -20,6 +20,7 @@ pub struct ServerConfig {
     pub webdav: bool,
     pub webdav_user: Option<String>,
     pub webdav_pass: Option<String>,
+    pub webui_auth: bool,
 }
 
 impl ServerConfig {
@@ -53,6 +54,7 @@ impl From<&Args> for ServerConfig {
             webdav: !args.no_webdav,
             webdav_user: args.webdav_user.clone(),
             webdav_pass: args.webdav_pass.clone(),
+            webui_auth: args.webui_auth,
         }
     }
 }

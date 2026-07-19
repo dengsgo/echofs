@@ -269,6 +269,7 @@ struct EchoApp {
     webdav: bool,
     webdav_user: String,
     webdav_pass: String,
+    webui_auth: bool,
     open_browser: bool,
 
     // --- running state ---
@@ -315,6 +316,7 @@ impl EchoApp {
             webdav: !args.no_webdav,
             webdav_user: args.webdav_user.clone().unwrap_or_default(),
             webdav_pass: args.webdav_pass.clone().unwrap_or_default(),
+            webui_auth: args.webui_auth,
             open_browser: args.open,
             handle: None,
             local_addr: None,
@@ -392,6 +394,13 @@ impl EchoApp {
             Some(self.webdav_pass.clone())
         };
 
+        if self.webui_auth && webdav_user.is_none() {
+            return Err(format!(
+                "{}: --webui-auth requires --webdav-user",
+                tr(lang, "Configuration error", "配置错误")
+            ));
+        }
+
         Ok(ServerConfig {
             root: root_path,
             bind,
@@ -402,6 +411,7 @@ impl EchoApp {
             webdav: self.webdav,
             webdav_user,
             webdav_pass,
+            webui_auth: self.webui_auth,
         })
     }
 
@@ -586,6 +596,16 @@ impl eframe::App for EchoApp {
                         ui.vertical(|ui| {
                             ui.checkbox(&mut self.show_hidden, tr(lang, "Show hidden files", "显示隐藏文件"));
                             ui.checkbox(&mut self.webdav, tr(lang, "Enable WebDAV", "启用 WebDAV"));
+                            ui.add_enabled_ui(self.webdav, |ui| {
+                                ui.checkbox(
+                                    &mut self.webui_auth,
+                                    tr(
+                                        lang,
+                                        "Share WebDAV auth with web UI (browser access requires login)",
+                                        "Web UI 共用 WebDAV 认证（浏览器访问需登录）",
+                                    ),
+                                );
+                            });
                             ui.checkbox(&mut self.open_browser, tr(lang, "Open browser on start", "启动时打开浏览器"));
                         });
                         ui.end_row();
