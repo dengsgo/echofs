@@ -49,6 +49,14 @@ pub fn index_html() -> String {
   <div id="content"><div class="loading">Loading...</div></div>
 </div>
 
+<footer class="footer">
+  <a href="https://github.com/dengsgo/echofs" target="_blank" rel="noopener noreferrer">GitHub</a>
+  <span class="footer-sep">&middot;</span>
+  <a href="https://github.com/dengsgo/echofs/issues" target="_blank" rel="noopener noreferrer">Feedback</a>
+  <span class="footer-sep">&middot;</span>
+  <a href="https://www.yoytang.com/about.me.html" target="_blank" rel="noopener noreferrer">Developer</a>
+</footer>
+
 <!-- Preview Modal -->
 <div class="modal-overlay" id="modal">
   <div class="modal">
@@ -724,5 +732,33 @@ mod tests {
     fn error_html_contains_echofs() {
         let html = error_html(404, "Not Found", "msg");
         assert!(html.contains("EchoFS"));
+    }
+
+    /// The SPA ships a footer with the project links (open-source repo,
+    /// feedback/issues, developer). It must sit at the bottom of the viewport
+    /// even when the directory listing doesn't fill the screen — hence the
+    /// flex-column body + flex:1 container layout markers.
+    #[test]
+    fn footer_contains_project_links() {
+        let html = index_html();
+        assert!(html.contains("class=\"footer\""), "missing footer element");
+        assert!(
+            html.contains("href=\"https://github.com/dengsgo/echofs\""),
+            "missing GitHub repo link"
+        );
+        assert!(
+            html.contains("href=\"https://github.com/dengsgo/echofs/issues\""),
+            "missing Feedback (issues) link"
+        );
+        assert!(
+            html.contains("href=\"https://www.yoytang.com/about.me.html\""),
+            "missing Developer link"
+        );
+        // Sticky-bottom layout: body is a flex column and .container grows.
+        assert!(
+            html.contains("flex-direction: column"),
+            "body must be a flex column to pin the footer"
+        );
+        assert!(html.contains(".footer-sep"), "missing footer separator style");
     }
 }

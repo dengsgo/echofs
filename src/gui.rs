@@ -252,6 +252,22 @@ fn tr(lang: Lang, en: &'static str, zh: &'static str) -> &'static str {
     }
 }
 
+/// Footer link drawn as a small gray label. The built-in [`egui::Hyperlink`]
+/// forces `visuals.hyperlink_color` (blue) and ignores any color set on its
+/// text, so the footer rolls its own clickable label instead.
+fn footer_link(ui: &mut egui::Ui, text: &str, url: &str, color: egui::Color32) {
+    let response = ui.add(
+        egui::Label::new(egui::RichText::new(text).size(12.0).color(color))
+            .sense(egui::Sense::click()),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() {
+        let _ = open::that(url);
+    }
+}
+
 /// Editable form state plus runtime handles.
 struct EchoApp {
     rt: Arc<tokio::runtime::Runtime>,
@@ -513,6 +529,42 @@ impl EchoApp {
 impl eframe::App for EchoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_logs();
+
+        let lang = self.lang;
+
+        // --- Footer links ---
+        // Lives in its own bottom panel so it is always visible: the log
+        // ScrollArea inside the central panel fills every leftover pixel
+        // (auto_shrink off), so widgets added after it would be laid out
+        // below the panel's clip rect and silently cut off.
+        egui::Panel::bottom("footer_panel")
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                // Gray-black in light mode; its dark-mode equivalent stays
+                // visible against the dark panel fill.
+                let color = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(160, 160, 165)
+                } else {
+                    egui::Color32::from_rgb(90, 90, 95)
+                };
+                ui.horizontal_centered(|ui| {
+                    footer_link(ui, "GitHub", "https://github.com/dengsgo/echofs", color);
+                    ui.label(egui::RichText::new("·").size(12.0).color(color));
+                    footer_link(
+                        ui,
+                        tr(lang, "Feedback", "反馈"),
+                        "https://github.com/dengsgo/echofs/issues",
+                        color,
+                    );
+                    ui.label(egui::RichText::new("·").size(12.0).color(color));
+                    footer_link(
+                        ui,
+                        tr(lang, "Developer", "开发者"),
+                        "https://www.yoytang.com/about.me.html",
+                        color,
+                    );
+                });
+            });
 
         // The `Ui` handed to `App::ui` has no background or margin, so wrap the
         // whole UI in a CentralPanel — otherwise empty regions show the near
