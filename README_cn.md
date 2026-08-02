@@ -273,8 +273,8 @@ echofs/
 │   ├── range.rs         HTTP Range 请求解析与 206 响应构建
 │   ├── directory.rs     异步目录遍历、路径安全校验、隐藏文件拦截
 │   ├── template.rs      SPA 组装器：拼接 HTML 标记与内嵌 CSS/JS
-│   ├── template.css     内嵌样式表（主题、布局、模态框、Plyr 样式覆盖）
-│   ├── template.js      内嵌 SPA 逻辑（路由、文件操作、Plyr 懒加载、3× 倍速手势）
+│   ├── template.css     内嵌样式表（主题、布局、模态框、视频预览）
+│   ├── template.js      内嵌 SPA 逻辑（路由、文件操作、原生视频预览、3× 倍速手势）
 │   ├── mime_utils.rs    MIME 类型检测与文件图标映射
 │   ├── error.rs         统一错误类型，支持双模式响应（HTML/JSON）
 │   ├── throttle.rs      单请求限速（令牌桶 ThrottledRead 包装器）

@@ -273,8 +273,8 @@ echofs/
 │   ├── range.rs         HTTP Range request parsing and 206 response builder
 │   ├── directory.rs     Async directory traversal, path safety, hidden file blocking
 │   ├── template.rs      SPA assembler: concatenates HTML markup with embedded CSS/JS
-│   ├── template.css     Embedded stylesheet (themes, layouts, modals, Plyr overrides)
-│   ├── template.js      Embedded SPA logic (routing, file ops, Plyr lazy loader, 3× boost gesture)
+│   ├── template.css     Embedded stylesheet (themes, layouts, modals, video preview)
+│   ├── template.js      Embedded SPA logic (routing, file ops, native video preview, 3× boost gesture)
 │   ├── mime_utils.rs    MIME type detection and file icon mapping
 │   ├── error.rs         Unified error type with dual-mode responses (HTML/JSON)
 │   ├── throttle.rs      Per-request speed limiting (token-bucket ThrottledRead wrapper)

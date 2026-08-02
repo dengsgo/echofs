@@ -887,25 +887,10 @@ body {
 .nav-next { right: 8px; }
 .modal video, .modal audio { display: block; max-width: 88vw; max-height: 80vh; }
 .modal img { display: block; max-width: 88vw; max-height: 80vh; object-fit: contain; }
-/* Plyr wrapper: constrain to the same envelope as bare <video>. Plyr injects
- * a .plyr container around the <video>; without these rules it tries to fill
- * its parent and breaks the modal layout. The inner <video> is overridden
- * back to 100% so it fills the wrapper instead of the 88vw cap above. */
-.modal .plyr { display: block; max-width: 88vw; max-height: 80vh; width: auto; }
-.modal .plyr--video { background: #000; border-radius: 0; }
-.modal .plyr video { max-width: 100%; max-height: 80vh; width: 100%; }
 /* Disable native long-press gestures (text select on desktop, save-image
- * context menu / callout on mobile) on the parts of the Plyr UI that our
- * hold-to-speed-up gesture lands on. The selector is deliberately narrow:
- * a wildcard descendant selector would also override Plyr's own
- * `.plyr__progress { touch-action: none }`, breaking touch-drag seek on
- * mobile. We target only the surfaces the user can long-press to boost —
- * the video element, its wrapper, the poster overlay, and the big
- * overlaid play button. */
-.modal .plyr__video-wrapper,
-.modal .plyr__video-wrapper video,
-.modal .plyr__poster,
-.modal .plyr__control--overlaid {
+ * context menu / callout on mobile) on the video surface our hold-to-speed-up
+ * gesture lands on. */
+.modal video {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
@@ -914,7 +899,7 @@ body {
 /* "Hold right half for boosted speed" indicator. Floats above the video;
  * fades in while the gesture is active and out on release. pointer-events:
  * none so it never steals the pointer up event that ends the gesture. */
-.plyr-speed-indicator {
+.speed-indicator {
   position: fixed;
   top: 24px;
   left: 50%;
@@ -931,7 +916,7 @@ body {
   z-index: 1100;
   letter-spacing: 0.5px;
 }
-.plyr-speed-indicator.visible { opacity: 1; }
+.speed-indicator.visible { opacity: 1; }
 .modal-title {
   padding: 12px 48px 12px 16px;
   font-size: 14px;
@@ -993,10 +978,6 @@ body {
   .modal { border-radius: 8px; }
   .modal video, .modal audio { max-width: 94vw; max-height: 75vh; }
   .modal img { max-width: 94vw; max-height: 75vh; }
-  .modal .plyr { max-width: 94vw; max-height: 75vh; }
-  .modal .plyr video { max-height: 75vh; }
-  .modal .plyr { max-width: 94vw; max-height: 75vh; }
-  .modal .plyr video { max-height: 75vh; }
   .nav-btn { width: 44px; height: 44px; font-size: 22px; }
   .nav-prev { left: 4px; }
   .nav-next { right: 4px; }
@@ -1017,8 +998,6 @@ body {
   }
   .modal video, .modal audio { max-width: 100vw; max-height: calc(100vh - 48px); }
   .modal img { max-width: 100vw; max-height: calc(100vh - 48px); }
-  .modal .plyr { max-width: 100vw; max-height: calc(100vh - 48px); }
-  .modal .plyr video { max-height: calc(100vh - 48px); }
 }
 
 /* ===== File Management UI ===== */
@@ -1280,10 +1259,6 @@ body {
 }
 .toast-error {
   background: #ff3b30;
-  color: #fff;
-}
-.toast-info {
-  background: #007aff;
   color: #fff;
 }
 @keyframes toastIn {

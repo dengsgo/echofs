@@ -15,25 +15,7 @@
   };
 
   const SORT_LABELS = { name: 'Name', size: 'Size', created: 'Created', modified: 'Modified' };
-  // Plyr (video player) is loaded from CDN on first video preview only.
-  // The bulk of users browsing directories never trigger this, so paying
-  // ~80KB JS + ~16KB CSS upfront would be waste. plyrLoaderPromise caches
-  // the in-flight or resolved load so concurrent previews share one fetch.
-  //
-  // When the CDN is unreachable (offline LAN, blocked region, broken DNS,
-  // TCP black-hole) we fall back to the native <video controls> that's
-  // already rendered into the modal — Plyr only enhances an existing video
-  // element, so the placeholder works as a fully functional fallback.
-  // After the first failure we set plyrUnavailable=true for the rest of the
-  // session; further previews skip the load attempt entirely (no 8s wait
-  // per preview).
-  const PLYR_JS = 'https://cdn.plyr.io/3.8.4/plyr.js';
-  const PLYR_CSS = 'https://cdn.plyr.io/3.8.4/plyr.css';
-  const PLYR_LOAD_TIMEOUT_MS = 8000;
-  let plyrLoaderPromise = null;
-  let plyrUnavailable = false;
-  let currentPlyr = null;
-  let currentPlyrCleanup = null;
+  let speedGestureCleanup = null;
   let currentEntries = [];
   let sortField = 'name';
   let sortAsc = true;
@@ -44,106 +26,38 @@
   let currentPath = '/';
   let viewMode = 'list'; // 'list' or 'grid'
 
-  // Lazily inject Plyr <link> + <script>. Returns a promise that resolves to
-  // the global Plyr constructor, or rejects on failure (load error, missing
-  // global after load, or PLYR_LOAD_TIMEOUT_MS elapsed without onload firing —
-  // the timeout case covers TCP black-holes and stalled CDNs that never
-  // trigger script.onerror). On rejection plyrLoaderPromise is cleared AND
-  // the <script> tag is removed from <head> so a retry doesn't stack
-  // duplicate nodes / duplicate network requests; a stale <script> arriving
-  // after the timeout would also still fire onload and try to call our
-  // resolver, which the `settled` guard ignores. The CSS <link> is left in
-  // place: it's idempotent (browser de-dupes by URL on the next attempt is
-  // not guaranteed, but a leftover stylesheet doesn't break anything and
-  // may even still resolve in the background).
-  function loadPlyr() {
-    if (window.Plyr) return Promise.resolve(window.Plyr);
-    if (plyrLoaderPromise) return plyrLoaderPromise;
-    plyrLoaderPromise = new Promise(function(resolve, reject) {
-      var settled = false;
-      var script = null;
-      function detachScript() {
-        if (script && script.parentNode) script.parentNode.removeChild(script);
-        // Null the handlers so a late-arriving onload (CDN finally responded
-        // after the timeout) is a no-op even if the node somehow survives.
-        if (script) { script.onload = null; script.onerror = null; }
-      }
-      function fail(err) {
-        if (settled) return;
-        settled = true;
-        plyrLoaderPromise = null;
-        detachScript();
-        reject(err);
-      }
-      function succeed(P) {
-        if (settled) return;
-        settled = true;
-        resolve(P);
-      }
-
-      var link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = PLYR_CSS;
-      // CSS load failure is non-fatal for playback (Plyr still works
-      // unstyled, and the native <video> below is already visible) — log
-      // it so users can see why the player looks unstyled.
-      link.onerror = function() { console.warn('Plyr CSS failed to load from CDN'); };
-      document.head.appendChild(link);
-
-      script = document.createElement('script');
-      script.src = PLYR_JS;
-      script.async = true;
-      script.onload = function() {
-        if (window.Plyr) succeed(window.Plyr);
-        else fail(new Error('Plyr global missing after script load'));
-      };
-      script.onerror = function() {
-        fail(new Error('Plyr JS failed to load from CDN'));
-      };
-      document.head.appendChild(script);
-
-      // Hard timeout: some failure modes (DNS black-hole, hung TCP, captive
-      // portal, MITM proxy that swallows requests) never fire onerror. Cap
-      // the wait so the user isn't stuck staring at a dead modal.
-      setTimeout(function() {
-        fail(new Error('Plyr load timed out after ' + PLYR_LOAD_TIMEOUT_MS + 'ms'));
-      }, PLYR_LOAD_TIMEOUT_MS);
-    });
-    return plyrLoaderPromise;
-  }
-
   // Long-press the right half of the video to play at BOOST_RATE× speed
   // (currently 3×) — releases back to the original speed. Mirrors the
-  // gesture popularised by YouTube / Bilibili. Plyr exposes `player.speed`;
-  // everything else is hand-rolled.
+  // gesture popularised by YouTube / Bilibili, built on the native <video>
+  // element's playbackRate.
   //
   // Tricky bits handled here:
-  //   - Listen on the `.plyr` container, NOT the <video>. Plyr stacks a
-  //     poster div, a big "overlaid" play button, and a controls bar as
-  //     SIBLINGS of the <video> inside `.plyr`. Pointer events on those
-  //     overlays never bubble to the <video> — listeners attached there
-  //     get no events. (This was the bug in v1 of this gesture.)
   //   - Trigger only on the right half (relative to the <video> element,
   //     so letterbox bars don't shift the midline) so we don't fight with
   //     the eventual "double-tap left to seek backward" gesture.
+  //   - Skip the bottom CONTROLS_GUARD_PX strip: the native controls bar
+  //     lives in a closed UA shadow DOM, so its pointer events are
+  //     retargeted to the <video> and are indistinguishable from presses on
+  //     the frame. Excluding the strip keeps a long-press on fullscreen /
+  //     PiP / the seek bar from triggering the boost. The bar auto-hides,
+  //     so this occasionally blocks a valid gesture near the bottom — an
+  //     acceptable trade-off for not breaking the controls.
   //   - Use Pointer Events so one code path covers mouse + touch + pen.
   //   - 500ms hold threshold filters accidental taps; 10px move threshold
   //     filters scroll/drag attempts.
-  //   - Ignore presses that land on Plyr's own controls (the bottom bar,
-  //     the big play button) — those need their normal click behaviour.
   //   - Suppress the synthetic click that fires on pointerup after a long
-  //     press, otherwise Plyr would interpret it as "toggle pause".
+  //     press, otherwise the browser treats the release as a tap and
+  //     toggles play/pause.
   //   - Restore whatever speed the user had set before the gesture, not a
   //     hardcoded 1.0 — they may be watching at 1.5× already.
   //   - Returns a cleanup function; closeModal() calls it to remove the
   //     document-level listeners and the floating indicator element.
-  function attachHoldToSpeedUp(player) {
-    var video = player.media; // the underlying <video>
-    var container = player.elements && player.elements.container;
-    if (!video || !container) return function() {};
+  function attachHoldToSpeedUp(video) {
+    if (!video) return function() {};
     var HOLD_MS = 500;
     var MOVE_TOLERANCE = 10;
     var BOOST_RATE = 3;
+    var CONTROLS_GUARD_PX = 48;
     var holdTimer = null;
     var active = false;
     var pointerId = null;
@@ -158,7 +72,7 @@
     function ensureIndicator() {
       if (indicator) return indicator;
       indicator = document.createElement('div');
-      indicator.className = 'plyr-speed-indicator';
+      indicator.className = 'speed-indicator';
       indicator.textContent = '▶▶ ' + BOOST_RATE + '×';
       document.body.appendChild(indicator);
       return indicator;
@@ -169,17 +83,16 @@
     function onPointerDown(e) {
       // Only primary button for mouse; touch/pen always primary.
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      // Don't hijack presses on Plyr's own UI (controls bar, big play btn).
-      // Plyr's controls all carry one of these classes.
-      if (e.target.closest('.plyr__controls, .plyr__control, .plyr__menu')) return;
       // Don't trigger when paused — boosting a paused video is meaningless
       // and would surprise users tapping to play.
       if (video.paused) return;
-      // Right half only — measured against the <video> rect (not the .plyr
-      // container) so letterbox bars on either side don't shift the line.
+      // Right half only — measured against the <video> rect so letterbox
+      // bars on either side don't shift the line.
       var rect = video.getBoundingClientRect();
       if (rect.width === 0) return; // video not laid out yet
       if (e.clientX < rect.left + rect.width / 2) return;
+      // Ignore the bottom controls-bar strip — see the header comment.
+      if (e.clientY > rect.bottom - CONTROLS_GUARD_PX) return;
       // Suppress text selection / image drag during the press. preventDefault
       // on pointerdown also keeps mobile from showing the long-press menu.
       e.preventDefault();
@@ -190,8 +103,8 @@
       holdTimer = setTimeout(function() {
         holdTimer = null;
         active = true;
-        savedSpeed = player.speed || 1;
-        try { player.speed = BOOST_RATE; } catch (_) {}
+        savedSpeed = video.playbackRate || 1;
+        video.playbackRate = BOOST_RATE;
         showIndicator();
       }, HOLD_MS);
     }
@@ -214,11 +127,11 @@
       if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       if (active) {
         active = false;
-        try { player.speed = savedSpeed; } catch (_) {}
+        video.playbackRate = savedSpeed;
         hideIndicator();
         // The pointerup that ended a long-press will be followed by a
-        // synthetic `click` on the same target. Plyr listens for click on
-        // the container to toggle pause, which would be wrong here — swallow it.
+        // synthetic `click` on the same target — swallow it so the browser
+        // doesn't treat the release as a tap that toggles play/pause.
         suppressNextClick = true;
       }
       pointerId = null;
@@ -231,29 +144,27 @@
       }
     }
 
-    // Listen on the .plyr container (not the <video>) — see comment above.
-    container.addEventListener('pointerdown', onPointerDown);
+    video.addEventListener('pointerdown', onPointerDown);
     // pointermove / pointerup / pointercancel listen on document so we still
-    // get the release event if the pointer drifts off the player.
+    // get the release event if the pointer drifts off the video.
     document.addEventListener('pointermove', onPointerMove);
     document.addEventListener('pointerup', endHold);
     document.addEventListener('pointercancel', endHold);
-    // Capture-phase click handler on the container — beats Plyr's bubbled
-    // click → toggle-pause handler.
-    container.addEventListener('click', onClickCapture, true);
+    // Capture-phase click handler — beats any bubbled click handlers.
+    video.addEventListener('click', onClickCapture, true);
 
     return function cleanup() {
       if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       if (active) {
         // Mid-gesture cleanup (e.g. modal closed while held) — restore speed.
-        try { player.speed = savedSpeed; } catch (_) {}
+        video.playbackRate = savedSpeed;
         active = false;
       }
-      container.removeEventListener('pointerdown', onPointerDown);
+      video.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('pointermove', onPointerMove);
       document.removeEventListener('pointerup', endHold);
       document.removeEventListener('pointercancel', endHold);
-      container.removeEventListener('click', onClickCapture, true);
+      video.removeEventListener('click', onClickCapture, true);
       if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
       indicator = null;
     };
@@ -817,71 +728,13 @@
     }
 
     if (type === 'video') {
-      // Render a fully functional native <video> immediately. This serves
-      // two purposes: (1) the modal opens with no perceptible delay even
-      // while Plyr is still loading from CDN, and (2) it IS the fallback —
-      // if Plyr load fails / times out / throws, we just leave this element
-      // in place and the user gets browser-native controls. Mark the
-      // container with data-fallback so future code can tell which mode
-      // is active without poking at DOM internals.
-      mc.dataset.fallback = '0';
-      mc.innerHTML = '<video id="plyrVideo" controls autoplay playsinline style="max-width:88vw;max-height:80vh;display:block;"><source src="' + escHtml(href) + '">Your browser does not support video playback.</video>';
-      var videoEl = mc.querySelector('#plyrVideo');
-
-      // Skip the load attempt entirely if a previous preview already proved
-      // the CDN is unreachable — no point making the user wait 8 seconds
-      // each time. The native <video> is already playing.
-      if (plyrUnavailable) {
-        mc.dataset.fallback = '1';
-      } else {
-        loadPlyr().then(function(Plyr) {
-          // Bail if the user closed the modal (or moved to another preview)
-          // before Plyr finished loading.
-          if (!videoEl.isConnected) return;
-          // Destroy any previous instance — happens if a video preview is
-          // immediately replaced by another video preview.
-          if (currentPlyrCleanup) { try { currentPlyrCleanup(); } catch (_) {} currentPlyrCleanup = null; }
-          if (currentPlyr) { try { currentPlyr.destroy(); } catch (_) {} currentPlyr = null; }
-          // Plyr's constructor can also throw (rare: corrupted CDN response,
-          // browser quirk). Catch here too so a broken Plyr never breaks
-          // playback — fall back to the native controls already showing.
-          try {
-            currentPlyr = new Plyr(videoEl, {
-              autoplay: true,
-              controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'settings', 'pip', 'airplay', 'fullscreen'],
-            });
-          } catch (err) {
-            if (window.console) console.warn('Plyr construction failed, using native player:', err);
-            mc.dataset.fallback = '1';
-            plyrUnavailable = true;
-            return;
-          }
-          // Hold-to-speed-up gesture on the right half of the video. Wait for
-          // Plyr's ready event — `player.elements.container` doesn't exist
-          // synchronously after `new Plyr()`. The closed-over `currentPlyr`
-          // reference is the one we attach to (saved into a local so a fast
-          // user closing the modal doesn't make us bind to a stale player).
-          var playerForGesture = currentPlyr;
-          playerForGesture.on('ready', function() {
-            if (currentPlyr !== playerForGesture) return; // superseded
-            if (currentPlyrCleanup) { try { currentPlyrCleanup(); } catch (_) {} }
-            currentPlyrCleanup = attachHoldToSpeedUp(playerForGesture);
-          });
-        }).catch(function(err) {
-          // CDN unreachable / timeout / global-missing. The native <video>
-          // already mounted is fine on its own; just record the failure so
-          // future previews skip the wait, and tell the user once.
-          if (window.console) console.warn('Plyr unavailable, falling back to native player:', err);
-          if (videoEl.isConnected) mc.dataset.fallback = '1';
-          var firstTime = !plyrUnavailable;
-          plyrUnavailable = true;
-          if (firstTime) {
-            // Surface the fallback once per session — silent fallback
-            // would leave users wondering why the player looks different.
-            try { showToast('Enhanced player unavailable, using native video', 'info'); } catch (_) {}
-          }
-        });
-      }
+      mc.innerHTML = '<video id="previewVideo" controls autoplay playsinline style="max-width:88vw;max-height:80vh;display:block;"><source src="' + escHtml(href) + '">Your browser does not support video playback.</video>';
+      var videoEl = mc.querySelector('#previewVideo');
+      // Hold-to-speed-up gesture on the right half of the video. Tear down
+      // any previous instance first — happens if a video preview is
+      // immediately replaced by another video preview.
+      if (speedGestureCleanup) { try { speedGestureCleanup(); } catch (_) {} }
+      speedGestureCleanup = attachHoldToSpeedUp(videoEl);
     } else if (type === 'audio') {
       mc.innerHTML = '<audio controls autoplay><source src="' + escHtml(href) + '">Your browser does not support audio playback.</audio>';
     } else if (type === 'image') {
@@ -918,6 +771,9 @@
     currentImageIndex = newIndex;
     const img = imageList[currentImageIndex];
     const mc = document.getElementById('modalContent');
+    // Tear down the hold-to-speed gesture if a video preview is being
+    // replaced — its document-level listeners would otherwise dangle.
+    if (speedGestureCleanup) { try { speedGestureCleanup(); } catch (_) {} speedGestureCleanup = null; }
     mc.innerHTML = '<img src="' + escHtml(img.href) + '" alt="' + escHtml(img.name) + '">';
     const title = document.getElementById('modalTitle');
     updateImageCounter(title, img.name);
@@ -964,13 +820,10 @@
     modal.classList.remove('active');
     document.body.style.overflow = '';
     const mc = document.getElementById('modalContent');
-    // Tear down Plyr first — its destroy() restores the underlying <video>,
-    // which we then nuke along with the rest of the modal contents.
-    if (currentPlyrCleanup) { try { currentPlyrCleanup(); } catch (_) {} currentPlyrCleanup = null; }
-    if (currentPlyr) { try { currentPlyr.destroy(); } catch (_) {} currentPlyr = null; }
+    // Tear down the hold-to-speed gesture before nuking the modal contents.
+    if (speedGestureCleanup) { try { speedGestureCleanup(); } catch (_) {} speedGestureCleanup = null; }
     mc.querySelectorAll('video, audio').forEach(el => { el.pause(); el.src = ''; });
     mc.innerHTML = '';
-    delete mc.dataset.fallback;
     imageList = [];
     currentImageIndex = -1;
     updateNavButtons();
