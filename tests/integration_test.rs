@@ -35,6 +35,12 @@ impl TestEnv {
         Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, _tmp: tmp }
     }
 
+    /// Create a test environment rooted at an arbitrary path (possibly a
+    /// non-canonicalized path such as a symlink), holding the tempdir alive.
+    fn from_root(root: PathBuf, tmp: tempfile::TempDir) -> Self {
+        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, _tmp: tmp }
+    }
+
     fn show_hidden(mut self) -> Self {
         self.show_hidden = true;
         self
@@ -606,6 +612,62 @@ async fn nonexistent_file_404() {
     env.get("/no-such-file.txt").await.assert_status(StatusCode::NOT_FOUND);
 }
 
+/// Regression: the served root may itself be reached via a symlink (or a
+/// non-canonical path). Before the fix, the path-traversal guard compared a
+/// *canonicalized* parent against the *non-canonicalized* root, so when the
+/// root was a symlink the two forms never matched — legitimate files inside
+/// the root were wrongly rejected (403), and the comparison basis was unsound.
+/// The guard now canonicalizes the root too, so access inside a symlinked root
+/// works while traversal outside it is still denied.
+#[tokio::test]
+async fn symlinked_root_resolves_correctly_and_blocks_traversal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("inside.txt"), "ok").unwrap();
+
+    // A symlink `link -> real` serves as the (non-canonical) root.
+    let link = tmp.path().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    {
+        // Create a directory symlink; if the platform denies it, fall back to
+        // a directory junction so the test still exercises a non-canonical root.
+        match std::os::windows::fs::symlink_dir(&real, &link) {
+            Ok(()) => {}
+            Err(_) => {
+                // Junction creation requires a raw command; skip cleanly if unavailable.
+                let out = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(&link)
+                    .arg(&real)
+                    .output();
+                if out.is_err() || !out.unwrap().status.success() {
+                    // Environment cannot create symlinks/junctions — skip.
+                    eprintln!("symlink/junction unsupported, skipping");
+                    return;
+                }
+            }
+        }
+    }
+
+    // Root the server at the symlink (NOT the canonicalized real path).
+    let env = TestEnv::from_root(link.clone(), tmp);
+
+    // Legitimate access through the symlinked root must succeed (was 403 before).
+    let body = env.get("/inside.txt").await.assert_status(StatusCode::OK).text().await;
+    assert_eq!(body, "ok");
+
+    // Traversal outside the (symlinked) root must still be denied.
+    let status = env.get("/..%2F..%2F..%2Fetc%2Fpasswd").await.status();
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "expected 403 or 404, got {}",
+        status
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Error page HTML vs JSON
 // ═══════════════════════════════════════════════════════════════════════════
@@ -930,6 +992,36 @@ async fn webdav_propfind_subdirectory_depth_1() {
     assert!(body.contains("a.txt"));
     assert!(body.contains("b.txt"));
     assert!(body.contains("<D:collection/>"));
+}
+
+/// Regression: hrefs returned by PROPFIND must percent-encode every path
+/// segment, including *parent* directory names. Before the fix, only the
+/// leaf entry name was encoded — a parent directory containing a space or `#`
+/// leaked its raw characters into the href (e.g. `/my dir/#1/`), which WebDAV
+/// clients parsed as a fragment and resolved to the wrong resource.
+#[tokio::test]
+async fn webdav_propfind_href_encodes_parent_segments() {
+    let env = TestEnv::new().webdav();
+    env.write("my dir/#1/child file.txt", "data");
+
+    let body = env
+        .propfind("/my%20dir/%231", "1")
+        .await
+        .assert_status(StatusCode::MULTI_STATUS)
+        .text()
+        .await;
+
+    // The child href must be fully encoded: `/my%20dir/%231/child%20file.txt`.
+    assert!(body.contains("my%20dir/%231/child%20file.txt"),
+        "child href must encode parent segments; got:\n{body}");
+    // No raw (unescaped) space or '#' may appear inside a <D:href>.
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(inner) = t.strip_prefix("<D:href>").and_then(|s| s.strip_suffix("</D:href>")) {
+            assert!(!inner.contains(' '), "href {inner:?} must not contain a raw space");
+            assert!(!inner.contains('#'), "href {inner:?} must not contain a raw '#'");
+        }
+    }
 }
 
 #[tokio::test]

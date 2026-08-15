@@ -66,7 +66,14 @@ pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool,
     let root = root.to_path_buf();
     let rel = rel_path_owned.clone();
     tokio::task::spawn_blocking(move || {
-        let target = root.join(&rel);
+        // Canonicalize the root so path-traversal checks compare like-for-like.
+        // Without this, a relative or symlinked `--root` would compare a
+        // canonicalized parent against a non-canonicalized root, which can
+        // misjudge whether the parent lies within the served tree.
+        let canonical_root = std::fs::canonicalize(&root).map_err(|_| {
+            AppError::Internal("Root directory does not exist".into())
+        })?;
+        let target = canonical_root.join(&rel);
 
         // Validate parent directory exists and is within root
         let parent = target.parent().ok_or_else(|| {
@@ -77,7 +84,7 @@ pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool,
             AppError::Conflict("Parent directory does not exist".into())
         })?;
 
-        if !canonical_parent.starts_with(&root) {
+        if !canonical_parent.starts_with(&canonical_root) {
             return Err(AppError::Forbidden("Path traversal denied".into()));
         }
 
@@ -107,17 +114,22 @@ pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_de
     let root = root.to_path_buf();
     let rel = rel_path_owned.clone();
     tokio::task::spawn_blocking(move || {
+        // Canonicalize the root so path-traversal checks compare like-for-like
+        // (a relative or symlinked `--root` otherwise skews the comparison).
+        let canonical_root = std::fs::canonicalize(&root).map_err(|_| {
+            AppError::Internal("Root directory does not exist".into())
+        })?;
         let candidate = if rel.is_empty() {
-            root.clone()
+            canonical_root.clone()
         } else {
-            root.join(&rel)
+            canonical_root.join(&rel)
         };
 
         let canonical = std::fs::canonicalize(&candidate).map_err(|_| {
             AppError::NotFound(format!("Path not found: {}", rel))
         })?;
 
-        if !canonical.starts_with(&root) {
+        if !canonical.starts_with(&canonical_root) {
             return Err(AppError::Forbidden("Path traversal denied".into()));
         }
 
@@ -155,6 +167,19 @@ fn path_depth(rel_path: &str) -> u32 {
         return 0;
     }
     rel_path.split('/').filter(|s| !s.is_empty()).count() as u32
+}
+
+/// Percent-encode each non-empty segment of a relative path. Unlike encoding
+/// the whole string at once, this preserves `/` separators while encoding
+/// characters that are unsafe in a URL path segment (space, `#`, `?`, `%`,
+/// non-ASCII, etc.). Used when building hrefs so that parent directory names
+/// containing special characters produce valid URIs for WebDAV clients.
+pub(crate) fn encode_path_segments(rel: &str) -> String {
+    rel.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| percent_encoding::utf8_percent_encode(s, PATH_SEGMENT_ENCODE).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub async fn list_directory(root: &Path, rel_path: &str, show_hidden: bool, max_depth: i32) -> Result<DirListing, AppError> {
@@ -251,7 +276,11 @@ fn list_directory_sync(full_path: &Path, rel_path: &str, show_hidden: bool, max_
         let href = if rel.is_empty() {
             format!("/{}", percent_encoding::utf8_percent_encode(&name, PATH_SEGMENT_ENCODE))
         } else {
-            format!("/{}/{}", rel, percent_encoding::utf8_percent_encode(&name, PATH_SEGMENT_ENCODE))
+            format!(
+                "/{}/{}",
+                encode_path_segments(rel),
+                percent_encoding::utf8_percent_encode(&name, PATH_SEGMENT_ENCODE)
+            )
         };
 
         let mime = mime_utils::detect_mime(&entry.path());
@@ -443,6 +472,18 @@ mod tests {
         fs::write(root.join("my file.txt"), "data").unwrap();
         let listing = list_directory(&root, "", false, -1).await.unwrap();
         assert!(listing.entries[0].href.contains("my%20file.txt"));
+    }
+
+    #[tokio::test]
+    async fn list_directory_href_encodes_parent_segments() {
+        let (_tmp, root) = tmp_root();
+        fs::create_dir_all(root.join("my dir/#1")).unwrap();
+        fs::write(root.join("my dir/#1/child file.txt"), "data").unwrap();
+
+        let listing = list_directory(&root, "my dir/#1", false, -1).await.unwrap();
+        let entry = &listing.entries[0];
+        // Parent segments (space, '#') must be encoded; only '/' separators remain.
+        assert_eq!(entry.href, "/my%20dir/%231/child%20file.txt");
     }
 
     // ─── has_hidden_component ───

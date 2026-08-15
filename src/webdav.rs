@@ -663,7 +663,7 @@ async fn handle_propfind_inner(
         let dir_href = if rel_path.is_empty() {
             "/".to_string()
         } else {
-            format!("/{}/", rel_path)
+            format!("/{}/", directory::encode_path_segments(rel_path))
         };
         match dir_resource_props(&resolved, &dir_href).await {
             Ok(res) => resources.push(res),
@@ -689,7 +689,7 @@ async fn handle_propfind_inner(
         let file_href = if rel_path.is_empty() {
             "/".to_string()
         } else {
-            format!("/{}", rel_path.trim_start_matches('/'))
+            format!("/{}", directory::encode_path_segments(rel_path.trim_start_matches('/')))
         };
         match file_resource_props(&resolved, &file_href).await {
             Ok(res) => resources.push(res),
