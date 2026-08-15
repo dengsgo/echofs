@@ -476,6 +476,29 @@ mod tests {
         assert!(!html.contains("loadPlyr"), "Plyr lazy loader must be removed");
     }
 
+    /// Opening a video attempts to attach a same-named subtitle file from the
+    /// current directory. This pins the wiring: the helper exists, it's called
+    /// from the video branch, it recognises `.vtt`/`.srt`, and an SRT→VTT
+    /// converter is shipped for browsers without native SRT support.
+    #[test]
+    fn video_preview_attaches_subtitles() {
+        let html = index_html();
+        assert!(
+            html.contains("function attachSubtitles"),
+            "missing attachSubtitles helper"
+        );
+        assert!(
+            html.contains("attachSubtitles(videoEl, name)"),
+            "subtitle helper must be wired into the video preview branch"
+        );
+        assert!(html.contains(".vtt"), "must recognise .vtt subtitles");
+        assert!(html.contains(".srt"), "must recognise .srt subtitles");
+        assert!(
+            html.contains("function srtToVtt"),
+            "missing SRT→VTT converter"
+        );
+    }
+
     /// Long-press the right half of the video to play at BOOST_RATE× speed.
     /// The gesture is hand-rolled on the native <video> element's
     /// playbackRate. This test pins the key wiring: the helper exists, it's

@@ -735,6 +735,8 @@
       // immediately replaced by another video preview.
       if (speedGestureCleanup) { try { speedGestureCleanup(); } catch (_) {} }
       speedGestureCleanup = attachHoldToSpeedUp(videoEl);
+      // Try to attach a same-named subtitle file (silent on failure).
+      attachSubtitles(videoEl, name);
     } else if (type === 'audio') {
       mc.innerHTML = '<audio controls autoplay><source src="' + escHtml(href) + '">Your browser does not support audio playback.</audio>';
     } else if (type === 'image') {
@@ -750,6 +752,92 @@
     if (imageList.length > 1 && currentImageIndex >= 0) {
       titleEl.textContent = name + ' (' + (currentImageIndex + 1) + ' / ' + imageList.length + ')';
     }
+  }
+
+  // ── Subtitle loading ────────────────────────────────────────────────────
+  // When a video opens, look for a subtitle file in the same directory whose
+  // basename matches the video's (e.g. `movie.mp4` → `movie.srt` / `movie.vtt`).
+  // `.vtt` is natively supported; `.srt` is fetched and converted to VTT.
+  // All failures are silent — no subtitle simply means no subtitle.
+
+  var SUBTITLE_EXTS = ['.vtt', '.srt'];
+
+  // Strip the final extension from a filename ("movie.mp4" → "movie").
+  function stripExtension(name) {
+    var i = name.lastIndexOf('.');
+    return i > 0 ? name.slice(0, i) : name;
+  }
+
+  // Convert SRT timestamps (00:00:01,000) and framing to a minimal WebVTT.
+  function srtToVtt(srt) {
+    return 'WEBVTT\n\n' + srt
+      .replace(/\r\n?/g, '\n')
+      .replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  }
+
+  // Attach a matching subtitle track to a video element. No-op (silently)
+  // when no matching subtitle file exists or loading/parsing fails.
+  function attachSubtitles(videoEl, videoName) {
+    var base = stripExtension(videoName).toLowerCase();
+
+    var match = (currentEntries || []).filter(function(e) {
+      if (e.is_dir) return false;
+      var lower = e.name.toLowerCase();
+      for (var i = 0; i < SUBTITLE_EXTS.length; i++) {
+        if (lower === base + SUBTITLE_EXTS[i]) return true;
+      }
+      return false;
+    });
+
+    if (match.length === 0) return;
+
+    // Prefer .vtt (native) over .srt.
+    match.sort(function(a, b) {
+      var ai = SUBTITLE_EXTS.indexOf(extOf(a.name));
+      var bi = SUBTITLE_EXTS.indexOf(extOf(b.name));
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
+    var sub = match[0];
+
+    var showWhenReady = function(track) {
+      // Some browsers only honour `default` once metadata has loaded; force
+      // the first text track into "showing" for a consistent result.
+      videoEl.addEventListener('loadedmetadata', function() {
+        var tracks = videoEl.textTracks;
+        if (tracks && tracks.length > 0) tracks[0].mode = 'showing';
+      });
+    };
+
+    var ext = extOf(sub.name);
+    if (ext === '.vtt') {
+      var track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.src = sub.href;
+      track.label = sub.name;
+      track.default = true;
+      videoEl.appendChild(track);
+      showWhenReady(track);
+    } else if (ext === '.srt') {
+      fetch(sub.href)
+        .then(function(resp) { if (!resp.ok) throw new Error('HTTP ' + resp.status); return resp.text(); })
+        .then(function(text) {
+          var blob = new Blob([srtToVtt(text)], { type: 'text/vtt' });
+          var url = URL.createObjectURL(blob);
+          var track = document.createElement('track');
+          track.kind = 'subtitles';
+          track.src = url;
+          track.label = sub.name;
+          track.default = true;
+          videoEl.appendChild(track);
+          showWhenReady(track);
+        })
+        .catch(function() { /* silent */ });
+    }
+  }
+
+  function extOf(name) {
+    var i = name.lastIndexOf('.');
+    return i >= 0 ? name.slice(i).toLowerCase() : '';
   }
 
   function updateNavButtons() {
