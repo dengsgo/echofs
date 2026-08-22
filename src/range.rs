@@ -7,7 +7,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::throttle::ThrottledRead;
 
-fn stream_body<R: AsyncRead + Send + Unpin + 'static>(reader: R, speed_limit: Option<u64>) -> Body {
+pub(crate) fn stream_body<R: AsyncRead + Send + Unpin + 'static>(reader: R, speed_limit: Option<u64>) -> Body {
     match speed_limit {
         Some(limit) => {
             let throttled = ThrottledRead::new(reader, limit);

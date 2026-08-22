@@ -35,6 +35,7 @@ src/
   error.rs      — AppError enum, dual-mode responses
   logging.rs    — Access log middleware (Stdout/Off/File/Channel; Channel feeds the GUI log panel)
   webdav.rs     — WebDAV (PROPFIND/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH/LOCK/UNLOCK)
+  zip_stream.rs — Folder ZIP download (?download=zip): walk + stream archive through an OS pipe
   gui.rs        — Optional egui desktop control panel; entire module is #[cfg(feature="gui")]
 tests/
   integration_test.rs — Integration tests via tower::ServiceExt::oneshot(); plus lifecycle mod (real listener + graceful shutdown)

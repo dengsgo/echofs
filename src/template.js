@@ -469,6 +469,9 @@
     if (hasPreview) {
       moreItems.push({ label: 'QR Code', action: 'qr' });
     }
+    if (e.is_dir) {
+      moreItems.push({ label: 'Download ZIP', action: 'download-zip' });
+    }
     if (webdavEnabled) {
       moreItems.push({ label: 'Rename', action: 'rename' });
       moreItems.push({ label: 'Move to...', action: 'move' });
@@ -593,6 +596,8 @@
     }
     if (!e.is_dir) {
       items.push({ label: 'Download', action: 'download' });
+    } else {
+      items.push({ label: 'Download ZIP', action: 'download-zip' });
     }
     items.push({ label: 'Copy Link', action: 'copy' });
     items.push({ label: 'QR Code', action: 'qr' });
@@ -1588,6 +1593,15 @@
         a.href = href;
         a.rel = 'noopener';
         a.click();
+        break;
+      case 'download-zip':
+        // Folder download: server streams a ZIP of the directory tree.
+        // Same temp-anchor trick so the browser handles Content-Disposition.
+        var za = document.createElement('a');
+        za.href = href + (href.indexOf('?') === -1 ? '?' : '&') + 'download=zip';
+        za.rel = 'noopener';
+        za.click();
+        closeAllMore();
         break;
       case 'rename':
         renameEntry(href, name);

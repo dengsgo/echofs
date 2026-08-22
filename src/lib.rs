@@ -11,6 +11,7 @@ pub mod server;
 pub mod template;
 pub mod throttle;
 pub mod webdav;
+pub mod zip_stream;
 
 #[cfg(feature = "gui")]
 pub mod gui;

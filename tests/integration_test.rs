@@ -354,6 +354,11 @@ impl TestResponse {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
+    /// Consume response and return raw body bytes.
+    async fn bytes(self) -> Vec<u8> {
+        self.0.into_body().collect().await.unwrap().to_bytes().to_vec()
+    }
+
     /// Consume response and return parsed JSON.
     async fn json(self) -> serde_json::Value {
         let text = self.text().await;
@@ -1774,4 +1779,221 @@ async fn webdav_propfind_self_href_normalized() {
         // No doubled slashes anywhere in the response.
         assert!(!body.contains("//"), "uri={uri} response must not contain doubled slashes");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Folder ZIP download (GET <dir>?download=zip)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse body bytes as a ZIP and return sorted entry names.
+fn zip_names(bytes: &[u8]) -> Vec<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))
+        .expect("body must be a valid ZIP archive");
+    let mut names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).expect("entry").name().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Extract a single text entry from ZIP body bytes.
+fn zip_entry_text(bytes: &[u8], name: &str) -> String {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))
+        .expect("body must be a valid ZIP archive");
+    let mut s = String::new();
+    archive
+        .by_name(name)
+        .unwrap_or_else(|_| panic!("missing ZIP entry {}", name))
+        .read_to_string(&mut s)
+        .expect("read entry");
+    s
+}
+
+#[tokio::test]
+async fn zip_download_streams_folder_tree() {
+    let env = TestEnv::new();
+    env.write("docs/a.txt", "alpha");
+    env.write("docs/sub/b.txt", "beta");
+
+    let resp = env
+        .get("/docs/?download=zip")
+        .await
+        .assert_status(StatusCode::OK)
+        .assert_header("content-type", "application/zip")
+        .assert_header_contains("content-disposition", "attachment")
+        .assert_header_contains("content-disposition", "filename*=UTF-8''docs.zip");
+    assert!(
+        resp.header("content-length").is_none(),
+        "ZIP must stream chunked (no Content-Length)"
+    );
+
+    let body = resp.bytes().await;
+    assert_eq!(
+        zip_names(&body),
+        vec!["docs/", "docs/a.txt", "docs/sub/", "docs/sub/b.txt"]
+    );
+    assert_eq!(zip_entry_text(&body, "docs/a.txt"), "alpha");
+    assert_eq!(zip_entry_text(&body, "docs/sub/b.txt"), "beta");
+}
+
+#[tokio::test]
+async fn zip_download_root_folder() {
+    let env = TestEnv::new();
+    env.write("top.txt", "t");
+
+    let resp = env
+        .get("/?download=zip")
+        .await
+        .assert_status(StatusCode::OK)
+        .assert_header("content-type", "application/zip");
+    let names = zip_names(&resp.bytes().await);
+    assert!(
+        names.iter().any(|n| n.ends_with("/top.txt")),
+        "root archive must contain top.txt under the root folder name, got {:?}",
+        names
+    );
+}
+
+#[tokio::test]
+async fn zip_download_cjk_name_in_content_disposition() {
+    let env = TestEnv::new();
+    env.write("文档/f.txt", "x");
+
+    // /%E6%96%87%E6%A1%A3/ = /文档/
+    let resp = env
+        .get("/%E6%96%87%E6%A1%A3/?download=zip")
+        .await
+        .assert_status(StatusCode::OK);
+    resp.assert_header_contains(
+        "content-disposition",
+        "filename*=UTF-8''%E6%96%87%E6%A1%A3.zip",
+    );
+}
+
+#[tokio::test]
+async fn zip_download_excludes_hidden_by_default() {
+    let env = TestEnv::new();
+    env.write("docs/visible.txt", "v");
+    env.write("docs/.hidden.txt", "h");
+    env.write("docs/.hdir/inner.txt", "i");
+
+    let body = env.get("/docs/?download=zip").await.assert_status(StatusCode::OK).bytes().await;
+    assert_eq!(zip_names(&body), vec!["docs/", "docs/visible.txt"]);
+}
+
+#[tokio::test]
+async fn zip_download_includes_hidden_when_enabled() {
+    let env = TestEnv::new().show_hidden();
+    env.write("docs/.hidden.txt", "h");
+
+    let body = env.get("/docs/?download=zip").await.assert_status(StatusCode::OK).bytes().await;
+    assert_eq!(zip_names(&body), vec!["docs/", "docs/.hidden.txt"]);
+}
+
+#[tokio::test]
+async fn zip_download_respects_max_depth() {
+    let env = TestEnv::new().max_depth(1);
+    env.write("docs/top.txt", "t");
+    env.write("docs/deep/x.txt", "x");
+
+    let body = env.get("/docs/?download=zip").await.assert_status(StatusCode::OK).bytes().await;
+    // docs is at depth 1; docs/deep (depth 2) is beyond --max-depth 1.
+    assert_eq!(zip_names(&body), vec!["docs/", "docs/top.txt"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zip_download_skips_symlinks_escaping_root() {
+    let env = TestEnv::new();
+    env.write("docs/ok.txt", "o");
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.txt"), "s").unwrap();
+    std::os::unix::fs::symlink(outside.path(), env.root.join("docs/escape")).unwrap();
+
+    let body = env.get("/docs/?download=zip").await.assert_status(StatusCode::OK).bytes().await;
+    assert_eq!(zip_names(&body), vec!["docs/", "docs/ok.txt"]);
+}
+
+#[tokio::test]
+async fn zip_download_param_on_file_serves_file_normally() {
+    let env = TestEnv::new();
+    env.write("f.txt", "plain data");
+
+    let resp = env.get("/f.txt?download=zip").await.assert_status(StatusCode::OK);
+    assert_ne!(resp.header("content-type").as_deref(), Some("application/zip"));
+    assert_eq!(resp.text().await, "plain data");
+}
+
+#[tokio::test]
+async fn zip_download_nonexistent_dir_is_404() {
+    let env = TestEnv::new();
+    env.get("/nope/?download=zip").await.assert_status(StatusCode::NOT_FOUND);
+}
+
+/// HEAD on a zip URL returns the download headers but must not start any
+/// walk/compression work (download managers probe with HEAD).
+#[tokio::test]
+async fn zip_download_head_returns_headers_without_body() {
+    let env = TestEnv::new();
+    env.write("docs/f.txt", "x");
+
+    let resp = env
+        .head("/docs/?download=zip")
+        .await
+        .assert_status(StatusCode::OK)
+        .assert_header("content-type", "application/zip")
+        .assert_header_contains("content-disposition", "filename*=UTF-8''docs.zip");
+    assert!(resp.bytes().await.is_empty(), "HEAD must not produce a body");
+}
+
+/// A throttled server must also throttle ZIP streams (the limiter wraps the
+/// archive body the same way it wraps file bodies).
+#[tokio::test]
+async fn zip_download_applies_speed_limit() {
+    let env = TestEnv::new();
+    // 192 KiB at 128 KiB/s: the token bucket starts full with 1s worth of
+    // tokens (128 KiB), so ~64 KiB must wait for refills → ≥ ~0.3s total.
+    // An unthrottled transfer of this size completes in milliseconds.
+    // Pseudo-random bytes + a "stored" extension keep the archive body at
+    // full size (deflate would crush repeated bytes to ~nothing).
+    let mut seed: u32 = 0x1234_5678;
+    let data: Vec<u8> = (0..192 * 1024)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        })
+        .collect();
+    env.write_bytes("docs/photo.jpg", &data);
+
+    let state = Arc::new(AppState {
+        root: env.root.clone(),
+        show_hidden: false,
+        max_depth: -1,
+        speed_limit: Some(128 * 1024),
+        webdav: false,
+        webdav_user: None,
+        webdav_pass: None,
+        webui_auth: false,
+    });
+    let router = Router::new()
+        .route("/", get(handlers::serve_index))
+        .route("/{*path}", get(handlers::serve_path))
+        .with_state(state);
+
+    let start = std::time::Instant::now();
+    let resp = router
+        .oneshot(Request::get("/docs/?download=zip").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed >= std::time::Duration::from_millis(300),
+        "192 KiB at 128 KiB/s should be throttled, finished in {:?}",
+        elapsed
+    );
+    assert!(zip_names(&bytes).contains(&"docs/photo.jpg".to_string()));
 }

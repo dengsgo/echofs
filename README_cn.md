@@ -19,6 +19,7 @@ EchoFS 是一个用 Rust 编写的轻量级 HTTP 文件服务器：把任意目�
 - **WebDAV（读写）** — 可在 Finder / 资源管理器 / Nautilus 中挂载为网络驱动器，支持上传、删除、复制、移动、创建目录；可通过 `--webdav-user` / `--webdav-pass` 启用 Basic Auth；通过 `--no-webdav` 禁用
 - **Web UI 认证** — 默认情况下，即使开启了 WebDAV 认证，网页 UI 仍然开放。配合 `--webdav-user` 设置 `--webui-auth` 后，浏览器对 GET/HEAD 的访问（文件下载、目录浏览）也将要求与 WebDAV 相同的 Basic Auth 凭据
 - **HTTP Range** — 视频拖动进度条与断点续传（HTTP 206）
+- **文件夹 ZIP 下载** — 在 Web UI 中（目录行的 "⋯" 菜单 → Download ZIP）或通过 `GET /{dir}/?download=zip`，将整个目录打包为一个 ZIP 下载。边压缩边传输——无临时文件、内存占用恒定、首字节即刻到达；图片、视频、音频等本身已压缩的文件按原样存储以节省 CPU；遵循隐藏文件规则、`--max-depth` 与 `--speed-limit` 限速
 - **安全防护** — 路径遍历防护；隐藏文件（`.env`、`.git` 等）默认拦截；通过 `--max-depth` 限制浏览深度
 - **单请求限速** — 通过 `--speed-limit` 限制下载速度
 - **访问日志** — 输出到控制台、文件，或完全关闭
@@ -214,7 +215,7 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求中添加 `X-Requested-W
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` `HEAD` | `/` `/{path}` | 目录 → HTML 或 JSON（带 XHR 头）；文件 → 流式传输 |
+| `GET` `HEAD` | `/` `/{path}` | 目录 → HTML 或 JSON（带 XHR 头），或流式 ZIP 打包下载（带 `?download=zip`）；文件 → 流式传输 |
 | `PROPFIND` | `/` `/{path}` | WebDAV 元数据 — `207 Multi-Status` XML（`Depth: 0` 或 `1`） |
 | `OPTIONS` | `/` `/{path}` | WebDAV 能力发现 |
 | `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content） |
@@ -279,7 +280,8 @@ echofs/
 │   ├── error.rs         统一错误类型，支持双模式响应（HTML/JSON）
 │   ├── throttle.rs      单请求限速（令牌桶 ThrottledRead 包装器）
 │   ├── gui.rs           可选的 egui 桌面控制面板（仅在 --features gui 时编译）
-│   └── webdav.rs        WebDAV：PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH 处理器、认证、XML 响应生成
+│   ├── webdav.rs        WebDAV：PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH 处理器、认证、XML 响应生成
+│   └── zip_stream.rs    文件夹 ZIP 下载：递归遍历，归档经 OS 管道流式输出（无临时文件）
 └── tests/
     └── integration_test.rs   集成测试（路由、API、文件服务、安全性、服务器生命周期）
 ```
@@ -290,7 +292,7 @@ echofs/
 cargo test
 ```
 
-151 项测试覆盖各模块单元测试、通过 `tower::oneshot` 的完整 HTTP 路由集成测试，以及服务器生命周期（真实监听器 + 优雅关闭）测试。启用 `--features gui` 会再增加若干项，共 156 项。
+182 项测试覆盖各模块单元测试、通过 `tower::oneshot` 的完整 HTTP 路由集成测试，以及服务器生命周期（真实监听器 + 优雅关闭）测试。启用 `--features gui` 会再增加若干项，共 187 项。
 
 ## 特别声明
 

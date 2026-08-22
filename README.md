@@ -19,6 +19,7 @@ EchoFS is a lightweight HTTP file server written in Rust: it turns any directory
 - **WebDAV (Read-Write)** — Mount as a network drive in Finder / Explorer / Nautilus; supports upload, delete, copy, move, mkdir; optional Basic Auth via `--webdav-user` / `--webdav-pass`; disable with `--no-webdav`
 - **Web UI Auth** — By default the browser UI is open even when WebDAV auth is on. Set `--webui-auth` (with `--webdav-user`) to gate browser GET/HEAD access (file downloads, directory listings) behind the same Basic Auth credentials as WebDAV
 - **HTTP Range** — Video seeking and resumable downloads via HTTP 206
+- **Folder ZIP Download** — Grab an entire directory as one ZIP from the web UI (a folder's "⋯" menu → Download ZIP) or via `GET /{dir}/?download=zip`. Archives are streamed while being compressed — no temp files, constant memory, first bytes arrive immediately; already-compressed media (photos, video, audio) is stored verbatim to save CPU; honors hidden-file rules, `--max-depth`, and `--speed-limit`
 - **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`
 - **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
 - **Access Logging** — Log to stdout, file, or disable entirely
@@ -214,7 +215,7 @@ EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XM
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` `HEAD` | `/` `/{path}` | Directory → HTML or JSON (with XHR header); File → streamed content |
+| `GET` `HEAD` | `/` `/{path}` | Directory → HTML or JSON (with XHR header), or streamed ZIP archive (with `?download=zip`); File → streamed content |
 | `PROPFIND` | `/` `/{path}` | WebDAV metadata — `207 Multi-Status` XML (`Depth: 0` or `1`) |
 | `OPTIONS` | `/` `/{path}` | WebDAV capability discovery |
 | `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content) |
@@ -279,7 +280,8 @@ echofs/
 │   ├── error.rs         Unified error type with dual-mode responses (HTML/JSON)
 │   ├── throttle.rs      Per-request speed limiting (token-bucket ThrottledRead wrapper)
 │   ├── gui.rs           Optional egui desktop control panel (compiled only with --features gui)
-│   └── webdav.rs        WebDAV: PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH, auth, XML generation
+│   ├── webdav.rs        WebDAV: PROPFIND/OPTIONS/PUT/DELETE/MKCOL/COPY/MOVE/PROPPATCH, auth, XML generation
+│   └── zip_stream.rs    Folder ZIP download: recursive walk, archive streamed through an OS pipe
 └── tests/
     └── integration_test.rs   Integration tests (router, API, file serving, security, server lifecycle)
 ```
@@ -290,7 +292,7 @@ echofs/
 cargo test
 ```
 
-151 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown). Building with `--features gui` adds a few more, for 156.
+182 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown). Building with `--features gui` adds a few more, for 187.
 
 ## Disclaimer
 

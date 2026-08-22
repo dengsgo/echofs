@@ -25,6 +25,7 @@ libc = "0.2"
 eframe = { version = "0.35", optional = true }
 rfd = { version = "0.17", optional = true }
 qrcode = { version = "0.14", default-features = false, optional = true }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [features]
 default = []

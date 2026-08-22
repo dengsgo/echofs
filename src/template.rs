@@ -385,7 +385,7 @@ mod tests {
         let html = index_html();
         // Every action keyword has a dispatcher branch. These are static strings in
         // the document click handler and are guaranteed to exist in the bundled JS.
-        for action in ["preview", "copy", "qr", "download", "rename", "move", "delete", "more-toggle", "move-browse-to"] {
+        for action in ["preview", "copy", "qr", "download", "download-zip", "rename", "move", "delete", "more-toggle", "move-browse-to"] {
             let needle = format!("case '{}':", action);
             assert!(html.contains(&needle), "missing dispatcher case '{action}'");
         }
@@ -396,7 +396,7 @@ mod tests {
         }
         // Dynamic action items pushed into the more menu — the action name appears
         // as a JS string literal next to the label.
-        for action in ["rename", "move", "delete", "download"] {
+        for action in ["rename", "move", "delete", "download", "download-zip"] {
             let needle = format!("action: '{}'", action);
             assert!(html.contains(&needle), "missing action: '{action}' in more-menu items");
         }
