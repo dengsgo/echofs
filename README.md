@@ -226,6 +226,8 @@ EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XM
 | `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
 | `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
 
+Two destructive-operation guards apply: the served root itself cannot be deleted — `DELETE /` (or any path spelling that resolves onto the root) is refused with `403` — and `COPY`/`MOVE` are refused with `409 Conflict`, per RFC 4918, when the `Destination` is identical to or inside the source, is an ancestor of the source, or would replace an existing directory with a file. Destinations containing `.`/`..` segments are rejected with `400`; a case-only rename on case-insensitive filesystems (e.g. Windows) is handled as a plain rename.
+
 <details>
 <summary>JSON response example</summary>
 

@@ -178,9 +178,10 @@ pub async fn handle_webdav_path(
     if let Err(resp) = check_auth(&state, &headers) {
         return resp;
     }
-    let rel_path = percent_encoding::percent_decode_str(&path)
-        .decode_utf8_lossy()
-        .to_string();
+    // `Path` already percent-decodes the captured segment; decoding again here
+    // would break names containing a literal `%` (a file named `a%20b.txt` is
+    // served as href `/a%2520b.txt`, which would decode twice into `a b.txt`).
+    let rel_path = path;
     match method.as_str() {
         "PROPFIND" => handle_propfind_inner(&state, &rel_path, &headers).await,
         "OPTIONS" => handle_options(),
@@ -389,6 +390,19 @@ async fn handle_delete(state: &AppState, rel_path: &str, _headers: &HeaderMap) -
         Err(e) => return error_to_webdav_response(e),
     };
 
+    // The root itself is never deletable. `DELETE /` resolves to exactly the
+    // canonical root (so does any spelling that lands there, e.g. `/sub/..`),
+    // and `remove_dir_all` on it would wipe the entire served tree.
+    let canonical_root = match std::fs::canonicalize(&state.root) {
+        Ok(p) => p,
+        Err(e) => return error_to_webdav_response(AppError::from(e)),
+    };
+    if resolved == canonical_root {
+        return error_to_webdav_response(AppError::Forbidden(
+            "The root directory cannot be deleted".into(),
+        ));
+    }
+
     let is_dir = resolved.is_dir();
     match tokio::task::spawn_blocking(move || {
         if is_dir {
@@ -459,6 +473,16 @@ async fn handle_copy(state: &AppState, rel_path: &str, headers: &HeaderMap) -> R
         Err(e) => return error_to_webdav_response(e),
     };
 
+    // Refuse destinations the overwrite handling would otherwise destroy
+    // (see `is_destructive_destination` for the covered shapes). This runs
+    // before every pre-delete below — including `COPY /`, whose destination
+    // always lies inside the source.
+    if is_destructive_destination(&source, &dest) {
+        return error_to_webdav_response(AppError::Conflict(
+            "Destination would overwrite the source or destroy an existing directory".into(),
+        ));
+    }
+
     let dest_existed = dest.exists();
     if dest_existed && !overwrite {
         return error_to_webdav_response(AppError::Conflict("Destination exists and Overwrite is F".into()));
@@ -513,13 +537,33 @@ async fn handle_move(state: &AppState, rel_path: &str, headers: &HeaderMap) -> R
     };
 
     let dest_existed = dest.exists();
+
+    // A case-only rename on a case-insensitive filesystem (e.g. Windows
+    // `file.txt` → `FILE.TXT`) lands on the same canonical file, so the
+    // overwrite pre-delete below would delete the source before the rename
+    // runs. Detect it so both the guard below and the pre-delete step
+    // aside — the OS rename itself is atomic and safe.
+    let same_resource_alias = dest_existed
+        && dest != source
+        && std::fs::canonicalize(&dest).map(|d| d == source).unwrap_or(false);
+
+    // Refuse destinations the overwrite handling would otherwise destroy
+    // (see `is_destructive_destination` for the covered shapes).
+    if !same_resource_alias && is_destructive_destination(&source, &dest) {
+        return error_to_webdav_response(AppError::Conflict(
+            "Destination would overwrite the source or destroy an existing directory".into(),
+        ));
+    }
+
     if dest_existed && !overwrite {
         return error_to_webdav_response(AppError::Conflict("Destination exists and Overwrite is F".into()));
     }
 
     match tokio::task::spawn_blocking(move || {
-        // Remove existing destination if overwriting
-        if dest_existed {
+        // Remove existing destination if overwriting — but never when dest
+        // aliases the source (case-only rename): deleting it would delete
+        // the source itself before the rename runs.
+        if dest_existed && !same_resource_alias {
             if dest.is_dir() {
                 std::fs::remove_dir_all(&dest)?;
             } else {
@@ -596,6 +640,16 @@ fn parse_destination(headers: &HeaderMap) -> Result<String, Response<Body>> {
         .decode_utf8_lossy()
         .to_string();
 
+    // Dot segments are the client's job to normalize (RFC 3986 §5.2.4), and
+    // they are exactly the spellings that let a destination resolve outside
+    // the lexical expectations of the destructive-destination guards (e.g.
+    // an overwrite whose pre-delete lands on the root's parent). Refuse them.
+    if decoded.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(error_to_webdav_response(AppError::BadRequest(
+            "Destination must not contain '.' or '..' path segments".into(),
+        )));
+    }
+
     Ok(decoded)
 }
 
@@ -606,6 +660,44 @@ fn parse_overwrite(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim() != "F")
         .unwrap_or(true)
+}
+
+/// Whether performing an overwrite-style COPY/MOVE to `dest` would destroy
+/// data beyond what the request names, i.e. any of:
+///   - `dest` is the source itself, under any spelling (case-variant names
+///     on case-insensitive filesystems canonicalize alike)
+///   - `dest` lies inside the source tree (the recursive copy/move would
+///     descend into the very tree being written)
+///   - `dest` is an ancestor of the source (the overwrite pre-delete would
+///     remove the directory containing the source)
+///   - `dest` is an existing directory while the source is a file (RFC 4918
+///     §9.8.5: a collection is not replaced by a non-collection)
+///
+/// `dest` is canonicalized before comparing, so `..`-component spellings
+/// that resolve onto the source or its ancestors are caught as well. A
+/// `dest` that does not exist can be neither the source nor its ancestor,
+/// so the non-existent case falls back to the lexical inside-the-tree check.
+///
+/// MOVE additionally allows a case-only alias through (see `handle_move`):
+/// the caller skips the pre-delete for it and the rename itself is safe.
+fn is_destructive_destination(source: &std::path::Path, dest: &std::path::Path) -> bool {
+    if source.is_file() {
+        if dest.is_dir() {
+            return true;
+        }
+        return match std::fs::canonicalize(dest) {
+            Ok(canonical_dest) => canonical_dest == source,
+            Err(_) => false,
+        };
+    }
+    match std::fs::canonicalize(dest) {
+        Ok(canonical_dest) => {
+            canonical_dest == source
+                || canonical_dest.starts_with(source)
+                || source.starts_with(&canonical_dest)
+        }
+        Err(_) => dest.starts_with(source),
+    }
 }
 
 /// Recursively copy a directory.

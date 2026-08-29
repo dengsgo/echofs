@@ -226,6 +226,8 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求中添加 `X-Requested-W
 | `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
 | `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
 
+两项破坏性操作守卫：服务根目录本身不可删除——`DELETE /`（或任何解析到根目录的路径写法）返回 `403`；`COPY`/`MOVE` 的 `Destination` 与源相同、位于源目录之内、是源的祖先目录，或会用文件替换已存在目录时，返回 `409 Conflict`（遵循 RFC 4918）。含 `.`/`..` 段的 Destination 返回 `400`；大小写不敏感文件系统（如 Windows）上的纯大小写改名按普通重命名处理。
+
 <details>
 <summary>JSON 响应示例</summary>
 

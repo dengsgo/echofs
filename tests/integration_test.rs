@@ -617,6 +617,26 @@ async fn nonexistent_file_404() {
     env.get("/no-such-file.txt").await.assert_status(StatusCode::NOT_FOUND);
 }
 
+/// Regression: the `Path` extractor already percent-decodes; the handlers used
+/// to decode a second time, so a file literally named `a%20b.txt` was listed
+/// with href `/a%2520b.txt` while that href resolved to `a b.txt` (404).
+#[tokio::test]
+async fn percent_in_filename_round_trips() {
+    let env = TestEnv::new().webdav();
+    env.write("a%20b.txt", "pct");
+
+    // The listing hands out the single-encoded form.
+    let json = env.xhr("/").await.json().await;
+    let entry = json["entries"].as_array().unwrap().iter()
+        .find(|e| e["name"] == "a%20b.txt")
+        .expect("entry listed");
+    assert_eq!(entry["href"], "/a%2520b.txt");
+
+    // And that href resolves back to the file.
+    let body = env.get("/a%2520b.txt").await.assert_status(StatusCode::OK).text().await;
+    assert_eq!(body, "pct");
+}
+
 /// Regression: the served root may itself be reached via a symlink (or a
 /// non-canonical path). Before the fix, the path-traversal guard compared a
 /// *canonicalized* parent against the *non-canonicalized* root, so when the
@@ -1208,6 +1228,223 @@ async fn webdav_copy_overwrite_false_conflicts() {
     env.authed_with_headers("COPY", "/source.txt", "", "", "", vec![("Destination", "/dest.txt"), ("Overwrite", "F")]).await.assert_status(StatusCode::CONFLICT);
     // dest.txt should be unchanged
     assert_eq!(std::fs::read_to_string(env.root.join("dest.txt")).unwrap(), "existing");
+}
+
+/// Regression: `DELETE /` resolved to the root itself and `remove_dir_all`ed
+/// the entire served tree. The root must now be refused.
+#[tokio::test]
+async fn webdav_delete_root_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.write("keep.txt", "data");
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.method("DELETE", "/").await.assert_status(StatusCode::FORBIDDEN);
+
+    assert!(env.root.join("keep.txt").exists());
+    assert!(env.root.join("sub/inner.txt").exists());
+}
+
+/// Regression: a spelling that resolves onto the root (here `/sub/..`) must
+/// hit the same guard as `DELETE /`. `show_hidden` is enabled so the request
+/// is not rejected earlier by the hidden-component rule (`..` starts with '.'
+/// when hidden files are blocked) — this pins the canonical-path guard itself.
+#[tokio::test]
+async fn webdav_delete_dotdot_spelling_resolving_to_root_is_refused() {
+    let env = TestEnv::new().webdav().show_hidden();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.method("DELETE", "/sub/..").await.assert_status(StatusCode::FORBIDDEN);
+
+    assert!(env.root.join("sub/inner.txt").exists());
+}
+
+/// Regression: `COPY /` into a child of itself recursed without bound and
+/// crashed the process with a stack overflow. Destination-inside-source is a
+/// 409 per RFC 4918 §9.8.4; the source tree must be untouched.
+#[tokio::test]
+async fn webdav_copy_root_into_subdir_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "data");
+
+    env.authed_with_headers("COPY", "/", "", "", "", vec![("Destination", "/copy")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert!(env.root.join("file.txt").exists());
+    assert!(!env.root.join("copy").exists());
+}
+
+/// Regression: copying a directory onto itself used to run the overwrite
+/// pre-delete first, destroying the source before the copy ran.
+#[tokio::test]
+async fn webdav_copy_onto_itself_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.authed_with_headers("COPY", "/sub", "", "", "", vec![("Destination", "/sub")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert_eq!(std::fs::read_to_string(env.root.join("sub/inner.txt")).unwrap(), "data");
+}
+
+/// Moving a directory into its own hierarchy is a 409 per RFC 4918 §9.9.4.
+#[tokio::test]
+async fn webdav_move_dir_into_itself_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.authed_with_headers("MOVE", "/sub", "", "", "", vec![("Destination", "/sub/deep")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert!(env.root.join("sub/inner.txt").exists());
+    assert!(!env.root.join("deep").exists());
+}
+
+/// Regression: moving onto the same path used to run the overwrite pre-delete
+/// (deleting the source) before a rename that could no longer succeed.
+#[tokio::test]
+async fn webdav_move_onto_itself_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.authed_with_headers("MOVE", "/sub", "", "", "", vec![("Destination", "/sub")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert!(env.root.join("sub/inner.txt").exists());
+}
+
+#[tokio::test]
+async fn webdav_move_file_onto_itself_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "data");
+
+    env.authed_with_headers("MOVE", "/file.txt", "", "", "", vec![("Destination", "/file.txt")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert_eq!(std::fs::read_to_string(env.root.join("file.txt")).unwrap(), "data");
+}
+
+/// Regression: moving a file onto a path that is an ancestor directory of
+/// that file used to run the overwrite pre-delete first — `remove_dir_all`
+/// on the destination removed the directory containing the source, losing
+/// the whole tree. Now a 409 with nothing touched.
+#[tokio::test]
+async fn webdav_move_file_onto_its_parent_dir_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+    env.write("other.txt", "keep");
+
+    env.authed_with_headers("MOVE", "/sub/inner.txt", "", "", "", vec![("Destination", "/sub")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert_eq!(std::fs::read_to_string(env.root.join("sub/inner.txt")).unwrap(), "data");
+    assert_eq!(std::fs::read_to_string(env.root.join("other.txt")).unwrap(), "keep");
+}
+
+/// Regression: copying a file onto its own path used to run the overwrite
+/// pre-delete (deleting the source) before a copy that could not succeed.
+#[tokio::test]
+async fn webdav_copy_file_onto_itself_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "data");
+
+    env.authed_with_headers("COPY", "/file.txt", "", "", "", vec![("Destination", "/file.txt")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert_eq!(std::fs::read_to_string(env.root.join("file.txt")).unwrap(), "data");
+}
+
+/// A file source must not overwrite a directory destination: the overwrite
+/// pre-delete would destroy the entire directory tree (RFC 4918 §9.8.5 —
+/// a collection is not replaced by a non-collection).
+#[tokio::test]
+async fn webdav_copy_file_onto_existing_dir_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "data");
+    env.mkdir("other");
+    env.write("other/inner.txt", "keep");
+
+    env.authed_with_headers("COPY", "/file.txt", "", "", "", vec![("Destination", "/other")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert!(env.root.join("other/inner.txt").exists());
+    assert!(env.root.join("file.txt").exists());
+}
+
+/// Exact-case directory names. Windows path lookups are case-insensitive, so
+/// `Path::exists()` cannot distinguish `file.txt` from `FILE.TXT` — only an
+/// enumeration can tell a case-only rename actually happened.
+#[cfg(windows)]
+fn exact_dir_names(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Regression (case-insensitive filesystems): `COPY /sub` with `Destination:
+/// /SUB` compared unequal as text, so the overwrite pre-delete removed the
+/// source directory itself. Canonicalized comparison catches the aliasing.
+/// (On case-sensitive platforms `/SUB` is simply a new sibling name and the
+/// copy is legitimate, so this test is Windows-only.)
+#[cfg(windows)]
+#[tokio::test]
+async fn webdav_copy_onto_case_variant_of_source_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+
+    env.authed_with_headers("COPY", "/sub", "", "", "", vec![("Destination", "/SUB")]).await.assert_status(StatusCode::CONFLICT);
+
+    assert_eq!(std::fs::read_to_string(env.root.join("sub/inner.txt")).unwrap(), "data");
+    assert!(!exact_dir_names(&env.root).iter().any(|n| n == "SUB"));
+}
+
+/// A case-only rename on Windows aliases the same canonical file; MOVE must
+/// skip the overwrite pre-delete (which would delete the source) and let the
+/// OS rename handle it. (On case-sensitive platforms this is a plain rename
+/// to a new name and never takes the aliasing path, so Windows-only.)
+#[cfg(windows)]
+#[tokio::test]
+async fn webdav_move_case_only_rename_succeeds() {
+    let env = TestEnv::new().webdav();
+    env.write("file.txt", "data");
+
+    env.authed_with_headers("MOVE", "/file.txt", "", "", "", vec![("Destination", "/FILE.TXT")]).await.assert_status(StatusCode::NO_CONTENT);
+
+    // Windows lookups are case-insensitive, so `file.txt.exists()` would
+    // still be true — enumerate to confirm the name really changed.
+    let names = exact_dir_names(&env.root);
+    assert!(!names.iter().any(|n| n == "file.txt"));
+    assert!(names.iter().any(|n| n == "FILE.TXT"));
+    assert_eq!(std::fs::read_to_string(env.root.join("FILE.TXT")).unwrap(), "data");
+}
+
+/// Destination URIs must not carry dot segments (RFC 3986 §5.2.4 leaves
+/// normalization to the client). A `..`-laden destination could otherwise
+/// resolve onto an ancestor of the source — or, with `--show-hidden`, out of
+/// the served root entirely — and the overwrite pre-delete would follow it.
+#[tokio::test]
+async fn webdav_move_with_dot_segments_in_destination_is_refused() {
+    let env = TestEnv::new().webdav();
+    env.mkdir("sub");
+    env.write("sub/inner.txt", "data");
+    env.mkdir("x");
+
+    env.authed_with_headers("MOVE", "/sub", "", "", "", vec![("Destination", "/x/../sub2")]).await.assert_status(StatusCode::BAD_REQUEST);
+
+    assert!(env.root.join("sub/inner.txt").exists());
+    assert!(!env.root.join("sub2").exists());
+}
+
+/// Regression: the WebDAV path handler used to percent-decode a second time,
+/// so PUTs to names containing a literal `%` landed on the wrong path.
+#[tokio::test]
+async fn webdav_percent_in_filename_round_trips() {
+    let env = TestEnv::new().webdav();
+
+    env.method_with_body("PUT", "/a%2520b.txt", "pct").await.assert_status(StatusCode::CREATED);
+    assert!(env.root.join("a%20b.txt").exists());
+
+    let body = env.get("/a%2520b.txt").await.assert_status(StatusCode::OK).text().await;
+    assert_eq!(body, "pct");
 }
 
 #[tokio::test]

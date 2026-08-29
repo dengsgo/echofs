@@ -175,9 +175,10 @@ pub async fn serve_path(
     uri: Uri,
     method: axum::http::Method,
 ) -> Response<Body> {
-    let rel_path = percent_encoding::percent_decode_str(&path)
-        .decode_utf8_lossy()
-        .to_string();
+    // `Path` already percent-decodes the captured segment; decoding again here
+    // would break names containing a literal `%` (a file named `a%20b.txt` is
+    // served as href `/a%2520b.txt`, which would decode twice into `a b.txt`).
+    let rel_path = path;
 
     let resolved = match directory::safe_resolve(&state.root, &rel_path, state.show_hidden, state.max_depth).await {
         Ok(p) => p,
