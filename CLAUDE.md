@@ -65,6 +65,10 @@ scripts/
 - **Dual-mode error responses** — `AppError::into_response_for(&headers)` returns HTML for browsers, JSON for AJAX (`X-Requested-With: XMLHttpRequest`)
 - **Streaming, never buffered** — files served via `ReaderStream`, optionally wrapped in `ThrottledRead`
 - **WebDAV auth is shared** — `--webdav-user`/`--webdav-pass` protects both WebDAV client operations and web UI file management (upload/rename/delete); browser GET/HEAD remains open
+- **CORS is off by default** — `build_router` applies `CorsLayer::permissive()` only when `AppState.cors` is set (`--cors`). With permissive CORS on, any web page could script `PUT`/`DELETE`/`MOVE` at the server, and the default config has no credentials to stop it. The SPA is same-origin, so it never needs CORS — keep the default off and don't reintroduce it into the request path.
+- **Untrusted served content** — every response gets `X-Content-Type-Options: nosniff` (in `server::response_headers_middleware`). Types the browser would execute (`mime_utils::is_scriptable`: html/xhtml/svg) additionally get `Content-Disposition: attachment` + `Content-Security-Policy: default-src 'none'; sandbox` in `handlers::serve_path`. Keep that list narrow so the media-server path is unaffected.
+- **Uploads stream and publish atomically** — `webdav::handle_put` writes the request body chunk-by-chunk to a hidden `.echofs-upload-*.part` sibling of the target, then `rename`s it into place. Never buffer a request body into memory, and never write directly onto the target (a failed upload would leave a truncated file). `--max-upload-size` (`AppState.max_upload`) is enforced mid-stream and returns 413.
+- **Credentials compare in constant time** — `webdav::timing_safe_eq`; a plain `==` leaks the credential through response timing.
 - **SPA client routing** — `history.pushState` + XHR header triggers JSON response from same endpoint
 - **Theme system** — CSS variables + `data-style` (classic/glass/cartoon) + `data-mode` (light/dark) attributes on `<html>`; persisted in localStorage
 - **Web file ops reuse WebDAV** — frontend JS calls MOVE/DELETE/PUT directly to existing WebDAV handlers; no separate backend endpoints

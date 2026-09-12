@@ -13,7 +13,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 use crate::cli::Args;
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, join_host_port};
 use crate::logging::LogTarget;
 use crate::netinfo;
 use crate::server::{self, ServerHandle};
@@ -428,6 +428,11 @@ impl EchoApp {
             webdav_user,
             webdav_pass,
             webui_auth: self.webui_auth,
+            // The GUI drives the bundled same-origin browser UI, which never
+            // needs CORS — and enabling it would let any web page script
+            // uploads/deletes at the server. Kept off here on purpose.
+            cors: false,
+            max_upload: None,
         })
     }
 
@@ -520,7 +525,9 @@ impl EchoApp {
                 }
             }
         } else {
-            out.push(format!("http://{}:{}", self.bind, port));
+            // Bracket IPv6 literals (`fe80::1` -> `http://[fe80::1]:8080`);
+            // the plain format would render an unusable URL.
+            out.push(format!("http://{}", join_host_port(&self.bind, port)));
         }
         out
     }

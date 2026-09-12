@@ -18,6 +18,9 @@ mime = "0.3"
 chrono = "0.4"
 percent-encoding = "2"
 http-body-util = "0.1"
+# Streaming an upload body chunk-by-chunk (StreamExt::next). Already in the
+# tree via axum, so this adds no compile cost.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 open = "5"
 libc = "0.2"
 

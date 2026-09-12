@@ -294,7 +294,13 @@ pub fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), Response<
             match base64_decode(&val[6..]) {
                 Some(decoded) => {
                     if let Some((user, pass)) = decoded.split_once(':') {
-                        user == expected_user && pass == expected_pass
+                        // Constant-time compare of both halves, then a single
+                        // decision: a plain `==` bails at the first differing
+                        // byte, which lets an attacker recover the credential
+                        // one character at a time from response timing.
+                        let user_ok = timing_safe_eq(user, expected_user);
+                        let pass_ok = timing_safe_eq(pass, expected_pass);
+                        user_ok && pass_ok
                     } else {
                         false
                     }
@@ -316,6 +322,23 @@ pub fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), Response<
             .body(Body::empty())
             .expect("building 401 response"))
     }
+}
+
+/// Compare two strings without leaking their contents through timing.
+///
+/// Walks the length of the *longer* input and never early-exits, so the time
+/// taken does not depend on where (or whether) the values differ. Shorter
+/// input is zero-padded for the comparison, so the length difference itself
+/// is not revealed either.
+fn timing_safe_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= (x ^ y) as usize;
+    }
+    diff == 0
 }
 
 /// Minimal base64 decoder (standard alphabet, no padding required).
@@ -348,26 +371,55 @@ fn base64_decode(input: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// PUT — Upload or overwrite a file.
+///
+/// The body is streamed straight to a temp file sitting next to the target and
+/// only then renamed into place:
+///
+/// - **Constant memory.** The old code collected the whole body before
+///   writing, so a 4 GB upload cost 4 GB of RAM (and the browser UI uploads
+///   4 files at once).
+/// - **Atomic publish.** A failed or over-limit upload leaves the previous
+///   file untouched instead of a truncated one; `rename` within the same
+///   directory is atomic, so a concurrent reader never sees a partial file.
+///   The replaced file's permissions are copied onto the temp file first, so
+///   an overwrite keeps its mode (hard links to it are still broken — that is
+///   inherent to publishing via rename).
+/// - **Bounded.** `state.max_upload` caps the body, and the temp file is
+///   removed on every failure path.
 async fn handle_put(state: &AppState, rel_path: &str, _headers: &HeaderMap, body: Body) -> Response<Body> {
-
     let target = match directory::safe_resolve_parent(&state.root, rel_path, state.show_hidden, state.max_depth).await {
         Ok(p) => p,
         Err(e) => return error_to_webdav_response(e),
     };
 
+    // Sibling of the target, so the rename below stays on one filesystem.
+    let temp = temp_sibling(&target);
+    // From here on, every exit path removes `temp` — see TempGuard.
+    let _temp_guard = TempGuard { path: temp.clone() };
+
     let existed = target.exists();
 
-    // Collect body bytes
-    use http_body_util::BodyExt;
-    let bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => return error_to_webdav_response(AppError::Internal(format!("Failed to read request body: {}", e))),
-    };
+    if let Err(e) = stream_to_file(body, &temp, state.max_upload).await {
+        // Best-effort cleanup: without it, every aborted upload would leave
+        // a stray `.echofs-upload-*.part` behind in the shared folder.
+        let _ = tokio::fs::remove_file(&temp).await;
+        return error_to_webdav_response(e);
+    }
 
-    let data = bytes.to_vec();
-    match tokio::task::spawn_blocking(move || {
-        std::fs::write(&target, &data)
-    }).await {
+    // Publish atomically. On failure (e.g. the target is a directory) the
+    // temp file must not survive either.
+    let rename = tokio::task::spawn_blocking(move || {
+        let result = publish_temp(&temp, &target);
+        // Covers every failure below — including a `set_permissions` error,
+        // which a guard on `rename` alone would leak.
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    })
+    .await;
+
+    match rename {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return error_to_webdav_response(AppError::from(e)),
         Err(e) => return error_to_webdav_response(AppError::Internal(format!("Task join error: {}", e))),
@@ -380,6 +432,104 @@ async fn handle_put(state: &AppState, rel_path: &str, _headers: &HeaderMap, body
         .header(header::CONTENT_LENGTH, "0")
         .body(Body::empty())
         .expect("building PUT response")
+}
+
+/// Move `temp` onto `target`, carrying over the mode of whatever is there now.
+///
+/// The previous `fs::write` wrote *through* the existing inode, so an overwrite
+/// kept that file's mode; renaming a fresh file in would silently reset it to
+/// the umask default — turning e.g. a private 0600 file into a world-readable
+/// 0644 one. (On Windows `Permissions` carries the read-only flag.)
+///
+/// Metadata is re-read rather than trusting the caller's `existed` flag: the
+/// target may have been deleted while the body was streaming, and a genuinely
+/// new file should get the default mode. Note this follows symlinks, so a PUT
+/// aimed at a link inside the root stamps the *link target's* mode onto the
+/// replacement — the link itself is replaced either way, by `rename`.
+fn publish_temp(temp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::metadata(target) {
+        std::fs::set_permissions(temp, meta.permissions())?;
+    }
+    std::fs::rename(temp, target)
+}
+
+/// Deletes its file when dropped.
+///
+/// `handle_put` already removes the temp file explicitly on the expected
+/// failure paths (over-limit, client disconnect, publish error) — those run on
+/// a blocking thread and are the common case. This guard is the backstop for
+/// exits they cannot cover: a panic unwinding out of the handler, or the
+/// request task being cancelled (`ServerHandle::abort`, i.e. the GUI's Stop
+/// button) mid-upload. Without it those leave a full-size
+/// `.echofs-upload-*.part` in the shared folder — invisible in listings and,
+/// because of the leading dot, not even deletable through WebDAV.
+///
+/// After a successful rename the temp path no longer exists, so the delete is
+/// a no-op there.
+///
+/// The removal is synchronous: `Drop` cannot await, and this runs at most
+/// once per upload on an abnormal path. A single `remove_file` is a
+/// metadata-only op, and the high-frequency paths stay on `spawn_blocking`.
+struct TempGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        // Best effort — there is nowhere to report a failure from here.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A unique temp-file path in `target`'s own directory.
+///
+/// The leading dot keeps it out of directory listings (`--show-hidden` is not
+/// required for it to exist). Uniqueness comes from pid + a process-wide
+/// counter, so concurrent uploads to the same name never collide.
+fn temp_sibling(target: &std::path::Path) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!(".echofs-upload-{}-{}.part", std::process::id(), n);
+    match target.parent() {
+        Some(dir) => dir.join(name),
+        None => std::path::PathBuf::from(name),
+    }
+}
+
+/// Stream `body` into `path`, refusing to write more than `limit` bytes.
+///
+/// Each chunk is written as it arrives, so neither the request body nor the
+/// file is ever held in memory. Exceeding the limit aborts mid-stream — the
+/// rest of the body is deliberately not drained, so a client pushing
+/// gigabytes it was told not to send stops wasting the connection.
+async fn stream_to_file(body: Body, path: &std::path::Path, limit: Option<u64>) -> Result<u64, AppError> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = body.into_data_stream();
+    let mut file = tokio::fs::File::create(path).await.map_err(AppError::from)?;
+    let mut written: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| AppError::Internal(format!("Failed to read request body: {}", e)))?;
+        let next = written.saturating_add(chunk.len() as u64);
+        if let Some(max) = limit
+            && next > max
+        {
+            return Err(AppError::PayloadTooLarge(format!(
+                "Upload exceeds the {} byte limit",
+                max
+            )));
+        }
+        file.write_all(&chunk).await.map_err(AppError::from)?;
+        written = next;
+    }
+
+    // Flush (and surface a full disk) before the caller renames this into
+    // place — otherwise the error would arrive after the old file was gone.
+    file.flush().await.map_err(AppError::from)?;
+    file.sync_all().await.map_err(AppError::from)?;
+    Ok(written)
 }
 
 /// DELETE — Remove a file or directory.
@@ -985,6 +1135,7 @@ fn error_to_webdav_response(err: AppError) -> Response<Body> {
         AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
         AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+        AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
         AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
     };
 
@@ -1258,6 +1409,99 @@ mod tests {
         assert_eq!(base64_decode("dXNlcjpwYXNz"), Some("user:pass".to_string()));
         // empty
         assert_eq!(base64_decode(""), Some("".to_string()));
+    }
+
+    #[test]
+    fn temp_guard_removes_file_on_drop() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join(".echofs-upload-1-0.part");
+        std::fs::write(&path, b"partial").expect("write");
+
+        {
+            let _guard = TempGuard { path: path.clone() };
+            assert!(path.exists());
+        }
+        assert!(!path.exists(), "guard must delete the temp file on drop");
+    }
+
+    /// The failure modes TempGuard exists for: a request task cancelled
+    /// mid-upload (`ServerHandle::abort`, i.e. the GUI Stop button) or a panic
+    /// unwinding out. Neither reaches the explicit cleanup calls, so without
+    /// the guard a full-size temp file is stranded in the shared folder.
+    #[tokio::test]
+    async fn aborted_upload_leaves_no_temp_file() {
+        use crate::handlers::AppState;
+        use axum::body::Bytes;
+        use futures_util::{StreamExt, stream};
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().canonicalize().expect("canonical");
+        let state = AppState {
+            root: root.clone(),
+            show_hidden: false,
+            max_depth: -1,
+            speed_limit: None,
+            webdav: true,
+            webdav_user: None,
+            webdav_pass: None,
+            webui_auth: false,
+            cors: false,
+            max_upload: None,
+        };
+
+        // Yields one chunk, then hangs forever: the upload is still in flight
+        // (temp file on disk) when we cancel.
+        let chunks: Vec<Result<Bytes, std::io::Error>> =
+            vec![Ok(Bytes::from_static(b"partial-data"))];
+        let body = Body::from_stream(
+            stream::iter(chunks).chain(stream::pending::<Result<Bytes, std::io::Error>>()),
+        );
+
+        let handle = tokio::spawn(async move {
+            handle_put(&state, "partial.bin", &HeaderMap::new(), body).await;
+        });
+
+        // Wait for the temp file to appear rather than sleeping a fixed time.
+        let mut temp_path = None;
+        for _ in 0..1000 {
+            if let Some(found) = std::fs::read_dir(&root).expect("read_dir").flatten().find(|e| {
+                e.file_name().to_string_lossy().starts_with(".echofs-upload-")
+            }) {
+                temp_path = Some(found.path());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let temp_path = temp_path.expect("temp file should exist mid-upload");
+        assert!(temp_path.exists());
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(
+            !temp_path.exists(),
+            "cancelled upload must not leave a temp file behind"
+        );
+        // And the partial file was never published.
+        assert!(!root.join("partial.bin").exists());
+    }
+
+    #[test]
+    fn timing_safe_eq_matches_equality_semantics() {
+        let cases = [
+            ("", "", true),
+            ("a", "a", true),
+            ("admin", "admin", true),
+            ("admin", "Admin", false),   // case sensitive
+            ("admin", "adm", false),     // shorter
+            ("adm", "admin", false),     // longer
+            ("admin", "admiN", false),   // last byte differs
+            ("admin", "bdmin", false),   // first byte differs
+            ("", "a", false),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(timing_safe_eq(a, b), expected, "timing_safe_eq({:?}, {:?})", a, b);
+        }
     }
 
     #[test]

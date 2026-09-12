@@ -20,7 +20,8 @@ EchoFS is a lightweight HTTP file server written in Rust: it turns any directory
 - **Web UI Auth** — By default the browser UI is open even when WebDAV auth is on. Set `--webui-auth` (with `--webdav-user`) to gate browser GET/HEAD access (file downloads, directory listings) behind the same Basic Auth credentials as WebDAV
 - **HTTP Range** — Video seeking and resumable downloads via HTTP 206
 - **Folder ZIP Download** — Grab an entire directory as one ZIP from the web UI (a folder's "⋯" menu → Download ZIP) or via `GET /{dir}/?download=zip`. Archives are streamed while being compressed — no temp files, constant memory, first bytes arrive immediately; already-compressed media (photos, video, audio) is stored verbatim to save CPU; honors hidden-file rules, `--max-depth`, and `--speed-limit`
-- **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`
+- **Security** — Path traversal protection; hidden files (`.env`, `.git`, etc.) blocked by default; depth limiting via `--max-depth`; CORS off by default; served HTML/SVG forced to download and sandboxed so shared content can never run script on the server's origin; capped uploads via `--max-upload-size`
+- **Uploads** — Streamed straight to disk in constant memory and published atomically, so a failed or over-limit upload never leaves a truncated file behind
 - **Speed Limiting** — Throttle per-request download speed with `--speed-limit`
 - **Access Logging** — Log to stdout, file, or disable entirely
 
@@ -104,6 +105,8 @@ Options:
       --webdav-user <WEBDAV_USER>  WebDAV username (enables Basic Auth for WebDAV access; does not affect web UI)
       --webdav-pass <WEBDAV_PASS>  WebDAV password (used with --webdav-user)
       --webui-auth   Require the same WebDAV Basic Auth for browser access (file downloads and directory listings). Requires --webdav-user to be set [default: off]
+      --cors         Allow cross-origin requests (permissive Access-Control-* headers). Off by default: enabling lets any web page script uploads/deletes against the server [default: off]
+      --max-upload-size <MAX_UPLOAD_SIZE>  Reject a single upload larger than this, e.g. 100m, 2g [default: unlimited]
   -l, --log <LOG>    Access log output: "stdout", "off", or a file path [default: stdout]
       --gui          Launch the desktop GUI control panel (gui builds only; also auto-opens when run with no arguments)
   -h, --help         Print help
@@ -141,7 +144,16 @@ echofs --webdav-user admin --webdav-pass secret
 
 # Also require login for the browser web UI (file downloads + listings)
 echofs --webdav-user admin --webdav-pass secret --webui-auth
+
+# Cap a single upload at 2 GB
+echofs --max-upload-size 2g
+
+# Allow a cross-origin API client (only if you really need it — see Security)
+echofs --cors
 ```
+
+> IPv6 bind addresses work as written — `--bind ::1` and `--bind fe80::1` are
+> accepted and bracketed internally.
 
 #### WebDAV
 
@@ -218,13 +230,17 @@ EchoFS provides a JSON API for directory listings. Add the `X-Requested-With: XM
 | `GET` `HEAD` | `/` `/{path}` | Directory → HTML or JSON (with XHR header), or streamed ZIP archive (with `?download=zip`); File → streamed content |
 | `PROPFIND` | `/` `/{path}` | WebDAV metadata — `207 Multi-Status` XML (`Depth: 0` or `1`) |
 | `OPTIONS` | `/` `/{path}` | WebDAV capability discovery |
-| `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content) |
+| `PUT` | `/{path}` | Upload or overwrite a file (201 Created / 204 No Content; 413 if it exceeds `--max-upload-size`) |
 | `DELETE` | `/{path}` | Delete a file or directory (204 No Content) |
 | `MKCOL` | `/{path}` | Create a directory (201 Created) |
 | `COPY` | `/{path}` | Copy a file/directory (`Destination` header required) |
 | `MOVE` | `/{path}` | Move/rename a file/directory (`Destination` header required) |
 | `PROPPATCH` | `/{path}` | Property update stub (207 Multi-Status) |
 | `LOCK` `UNLOCK` | `/` `/{path}` | Lock management (compatibility stubs for Finder/Explorer) |
+
+Every response carries `X-Content-Type-Options: nosniff`. Files whose type the browser would execute (`text/html`, `application/xhtml+xml`, `image/svg+xml`) additionally get `Content-Disposition: attachment` and `Content-Security-Policy: default-src 'none'; sandbox`, so a document dropped into the shared folder can never run script against the API. Images, audio, video and archives are served normally.
+
+CORS is **off** by default: with permissive CORS on, any web page you visit could script `PUT`/`DELETE`/`MOVE` at a running server, and without `--webdav-user` nothing would stop it. The bundled web UI is same-origin and needs no CORS; pass `--cors` only for a genuinely cross-origin client.
 
 Two destructive-operation guards apply: the served root itself cannot be deleted — `DELETE /` (or any path spelling that resolves onto the root) is refused with `403` — and `COPY`/`MOVE` are refused with `409 Conflict`, per RFC 4918, when the `Destination` is identical to or inside the source, is an ancestor of the source, or would replace an existing directory with a file. Destinations containing `.`/`..` segments are rejected with `400`; a case-only rename on case-insensitive filesystems (e.g. Windows) is handled as a plain rename.
 
@@ -294,7 +310,7 @@ echofs/
 cargo test
 ```
 
-182 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown). Building with `--features gui` adds a few more, for 187.
+215 tests covering each module's unit tests plus full HTTP routing via `tower::oneshot` and server lifecycle (real listener + graceful shutdown). Building with `--features gui` adds a few more, for 220.
 
 ## Disclaimer
 

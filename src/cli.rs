@@ -56,6 +56,24 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub webui_auth: bool,
 
+    /// Allow cross-origin (CORS) requests with permissive Access-Control-* headers
+    ///
+    /// Off by default, and deliberately so: with CORS on, any web page the
+    /// user visits can script destructive WebDAV calls (PUT/DELETE/MOVE) at
+    /// a running server — and without --webdav-user nothing stands in the
+    /// way. The bundled web UI is served from the same origin, so it never
+    /// needs this. Only enable it for a genuinely cross-origin API client.
+    #[arg(long, default_value_t = false)]
+    pub cors: bool,
+
+    /// Maximum size of a single upload (PUT), e.g. 100m, 2g (default: unlimited)
+    // `<SIZE>` instead of the derived `<MAX_UPLOAD_SIZE>`: this is the longest
+    // option name, and once the option column passes 40% of the terminal width
+    // clap switches *every* option to next-line help. See clap's
+    // `help_template::arg_next_line_help`.
+    #[arg(long, value_name = "SIZE")]
+    pub max_upload_size: Option<String>,
+
     /// Launch the desktop GUI control panel instead of running headless.
     /// (Also opened automatically when echofs is started with no arguments.)
     #[cfg(feature = "gui")]
@@ -73,13 +91,25 @@ impl Args {
     }
 
     pub fn bind_addr(&self) -> String {
-        format!("{}:{}", self.bind, self.port)
+        crate::config::join_host_port(&self.bind, self.port)
     }
 
     pub fn speed_limit_bytes(&self) -> Option<u64> {
         self.speed_limit.as_ref().map(|s| {
             throttle::parse_speed(s).unwrap_or_else(|| {
                 eprintln!("Error: invalid speed limit '{}' (examples: 500k, 1m, 10m)", s);
+                std::process::exit(1);
+            })
+        })
+    }
+
+    pub fn max_upload_bytes(&self) -> Option<u64> {
+        self.max_upload_size.as_ref().map(|s| {
+            throttle::parse_speed(s).unwrap_or_else(|| {
+                eprintln!(
+                    "Error: invalid upload size limit '{}' (examples: 100m, 2g)",
+                    s
+                );
                 std::process::exit(1);
             })
         })

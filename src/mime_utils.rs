@@ -26,6 +26,24 @@ pub fn is_media(m: &mime::Mime) -> bool {
     is_video(m) || is_audio(m) || is_image(m)
 }
 
+/// Whether the browser would execute script from this type when a user
+/// navigates to the file directly.
+///
+/// Served content is untrusted: a `.html` or `.svg` dropped into the shared
+/// folder would otherwise run script on the server's origin, where it can
+/// read the JSON listing API and issue WebDAV PUT/DELETE across the whole
+/// served tree. `X-Content-Type-Options: nosniff` does not help here — these
+/// files genuinely *are* `text/html`, so there is nothing to sniff.
+///
+/// Deliberately narrow: images, audio, video and archives are unaffected, so
+/// the media-server path keeps working exactly as before.
+pub fn is_scriptable(m: &mime::Mime) -> bool {
+    matches!(
+        m.essence_str(),
+        "text/html" | "application/xhtml+xml" | "image/svg+xml"
+    )
+}
+
 pub fn icon_for_path(path: &Path, is_dir: bool) -> &'static str {
     if is_dir {
         return "folder";
@@ -101,6 +119,20 @@ mod tests {
             assert_eq!(is_image(&m), img, "is_image mismatch for {}", file);
             assert_eq!(is_text(&m),  txt, "is_text mismatch for {}", file);
             assert_eq!(is_media(&m), med, "is_media mismatch for {}", file);
+        }
+    }
+
+    #[test]
+    fn scriptable_type_detection() {
+        // Types that can execute script in the browser → must be neutralized.
+        for file in ["page.html", "page.htm", "doc.xhtml", "draw.svg"] {
+            let m = detect_mime(Path::new(file));
+            assert!(is_scriptable(&m), "{} should be scriptable", file);
+        }
+        // Everything the media server is for must be left alone.
+        for file in ["photo.jpg", "photo.png", "clip.mp4", "song.mp3", "a.pdf", "a.zip", "a.txt", "a.json"] {
+            let m = detect_mime(Path::new(file));
+            assert!(!is_scriptable(&m), "{} should not be scriptable", file);
         }
     }
 

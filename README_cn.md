@@ -20,7 +20,8 @@ EchoFS 是一个用 Rust 编写的轻量级 HTTP 文件服务器：把任意目�
 - **Web UI 认证** — 默认情况下，即使开启了 WebDAV 认证，网页 UI 仍然开放。配合 `--webdav-user` 设置 `--webui-auth` 后，浏览器对 GET/HEAD 的访问（文件下载、目录浏览）也将要求与 WebDAV 相同的 Basic Auth 凭据
 - **HTTP Range** — 视频拖动进度条与断点续传（HTTP 206）
 - **文件夹 ZIP 下载** — 在 Web UI 中（目录行的 "⋯" 菜单 → Download ZIP）或通过 `GET /{dir}/?download=zip`，将整个目录打包为一个 ZIP 下载。边压缩边传输——无临时文件、内存占用恒定、首字节即刻到达；图片、视频、音频等本身已压缩的文件按原样存储以节省 CPU；遵循隐藏文件规则、`--max-depth` 与 `--speed-limit` 限速
-- **安全防护** — 路径遍历防护；隐藏文件（`.env`、`.git` 等）默认拦截；通过 `--max-depth` 限制浏览深度
+- **安全防护** — 路径遍历防护；隐藏文件（`.env`、`.git` 等）默认拦截；通过 `--max-depth` 限制浏览深度；CORS 默认关闭；HTML/SVG 等会被浏览器执行的类型强制下载并沙箱化，使共享内容无法在服务器源上执行脚本；`--max-upload-size` 限制单个上传大小
+- **上传** — 边收边写、内存占用恒定，写入完成后原子改名，上传失败或超限不会留下截断的文件
 - **单请求限速** — 通过 `--speed-limit` 限制下载速度
 - **访问日志** — 输出到控制台、文件，或完全关闭
 
@@ -104,6 +105,8 @@ Options:
       --webdav-user <WEBDAV_USER>  WebDAV 用户名（设置后所有 WebDAV 操作需认证；不影响网页访问）
       --webdav-pass <WEBDAV_PASS>  WebDAV 密码（与 --webdav-user 配合使用）
       --webui-auth   浏览器访问（文件下载与目录浏览）也要求与 WebDAV 相同的 Basic Auth。须配合 --webdav-user 使用 [默认: 关闭]
+      --cors         允许跨域请求（宽松的 Access-Control-* 响应头）。默认关闭：开启后任意网页都能脚本化地上传/删除服务器上的文件 [默认: 关闭]
+      --max-upload-size <MAX_UPLOAD_SIZE>  拒绝超过该大小的单个上传，如 100m、2g [默认: 不限制]
   -l, --log <LOG>    访问日志输出："stdout"、"off" 或文件路径 [默认: stdout]
       --gui          启动桌面 GUI 控制面板（仅 gui 编译版本可用；无参数运行时也会自动打开）
   -h, --help         打印帮助信息
@@ -141,7 +144,15 @@ echofs --webdav-user admin --webdav-pass secret
 
 # 同时要求浏览器 Web UI 登录（文件下载 + 目录浏览）
 echofs --webdav-user admin --webdav-pass secret --webui-auth
+
+# 限制单个上传不超过 2 GB
+echofs --max-upload-size 2g
+
+# 允许跨域 API 客户端调用（仅在确实需要时开启，参见"安全"一节）
+echofs --cors
 ```
+
+> IPv6 绑定地址可直接书写，`--bind ::1`、`--bind fe80::1` 均可正常使用（内部会自动加方括号）。
 
 #### WebDAV
 
@@ -218,13 +229,17 @@ EchoFS 提供 JSON 格式的目录列表 API。在请求中添加 `X-Requested-W
 | `GET` `HEAD` | `/` `/{path}` | 目录 → HTML 或 JSON（带 XHR 头），或流式 ZIP 打包下载（带 `?download=zip`）；文件 → 流式传输 |
 | `PROPFIND` | `/` `/{path}` | WebDAV 元数据 — `207 Multi-Status` XML（`Depth: 0` 或 `1`） |
 | `OPTIONS` | `/` `/{path}` | WebDAV 能力发现 |
-| `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content） |
+| `PUT` | `/{path}` | 上传或覆盖文件（201 Created / 204 No Content；超过 `--max-upload-size` 时返回 413） |
 | `DELETE` | `/{path}` | 删除文件或目录（204 No Content） |
 | `MKCOL` | `/{path}` | 创建目录（201 Created） |
 | `COPY` | `/{path}` | 复制文件/目录（需 `Destination` 头） |
 | `MOVE` | `/{path}` | 移动/重命名文件/目录（需 `Destination` 头） |
 | `PROPPATCH` | `/{path}` | 属性更新存根（207 Multi-Status） |
 | `LOCK` `UNLOCK` | `/` `/{path}` | 锁管理（Finder/资源管理器兼容性存根） |
+
+所有响应都带 `X-Content-Type-Options: nosniff`。对于浏览器会执行的类型（`text/html`、`application/xhtml+xml`、`image/svg+xml`），额外附加 `Content-Disposition: attachment` 与 `Content-Security-Policy: default-src 'none'; sandbox`，因此放进共享目录的文档永远无法对本服务的 API 执行脚本。图片、音频、视频与压缩包照常提供。
+
+CORS **默认关闭**：开启宽松 CORS 后，你访问的任意网页都能脚本化地对运行中的服务器发起 `PUT`/`DELETE`/`MOVE`，而在未设置 `--webdav-user` 时没有任何机制能够阻止。内置 Web UI 与服务器同源，不需要 CORS；只有在确实需要跨域客户端时才加 `--cors`。
 
 两项破坏性操作守卫：服务根目录本身不可删除——`DELETE /`（或任何解析到根目录的路径写法）返回 `403`；`COPY`/`MOVE` 的 `Destination` 与源相同、位于源目录之内、是源的祖先目录，或会用文件替换已存在目录时，返回 `409 Conflict`（遵循 RFC 4918）。含 `.`/`..` 段的 Destination 返回 `400`；大小写不敏感文件系统（如 Windows）上的纯大小写改名按普通重命名处理。
 
@@ -294,7 +309,7 @@ echofs/
 cargo test
 ```
 
-182 项测试覆盖各模块单元测试、通过 `tower::oneshot` 的完整 HTTP 路由集成测试，以及服务器生命周期（真实监听器 + 优雅关闭）测试。启用 `--features gui` 会再增加若干项，共 187 项。
+215 项测试覆盖各模块单元测试、通过 `tower::oneshot` 的完整 HTTP 路由集成测试，以及服务器生命周期（真实监听器 + 优雅关闭）测试。启用 `--features gui` 会再增加若干项，共 220 项。
 
 ## 特别声明
 

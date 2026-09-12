@@ -91,7 +91,10 @@ fn run_headless(args: Args) {
         };
 
         let port = handle.local_addr.port();
-        println!("Serving {} on http://{}:{}", config.root.display(), config.bind, port);
+        // Use the *actual* port: with `--port 0` the OS assigns one, and only
+        // `local_addr` knows what it is.
+        let addr = echofs::config::join_host_port(&config.bind, port);
+        println!("Serving {} on http://{}", config.root.display(), addr);
 
         if config.is_wildcard_bind() {
             println!("Available on:");
@@ -125,6 +128,14 @@ fn run_headless(args: Args) {
 
         if config.webui_auth {
             println!("Web UI auth: enabled (shares WebDAV credentials)");
+        }
+
+        if config.cors {
+            println!("CORS: enabled (permissive — any origin may call the API)");
+        }
+
+        if let Some(max) = config.max_upload {
+            println!("Upload limit: {} per file", echofs::directory::format_size(max));
         }
 
         if args.open {

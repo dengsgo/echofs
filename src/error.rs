@@ -9,6 +9,8 @@ pub enum AppError {
     Forbidden(String),
     BadRequest(String),
     Conflict(String),
+    /// Upload exceeded the configured size limit (413).
+    PayloadTooLarge(String),
     Internal(String),
 }
 
@@ -19,6 +21,7 @@ impl std::fmt::Display for AppError {
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            AppError::PayloadTooLarge(msg) => write!(f, "Payload Too Large: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
         }
     }
@@ -31,6 +34,9 @@ impl AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "Forbidden", msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "Bad Request", msg),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "Conflict", msg),
+            AppError::PayloadTooLarge(msg) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large", msg)
+            }
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error", msg),
         }
     }

@@ -940,6 +940,7 @@ dependencies = [
  "chrono",
  "clap",
  "eframe",
+ "futures-util",
  "http-body-util",
  "libc",
  "mime",

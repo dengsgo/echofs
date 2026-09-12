@@ -24,6 +24,8 @@ struct TestEnv {
     webdav_user: Option<String>,
     webdav_pass: Option<String>,
     webui_auth: bool,
+    cors: bool,
+    max_upload: Option<u64>,
     _tmp: tempfile::TempDir, // prevent cleanup until TestEnv is dropped
 }
 
@@ -32,13 +34,13 @@ impl TestEnv {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, _tmp: tmp }
+        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, cors: false, max_upload: None, _tmp: tmp }
     }
 
     /// Create a test environment rooted at an arbitrary path (possibly a
     /// non-canonicalized path such as a symlink), holding the tempdir alive.
     fn from_root(root: PathBuf, tmp: tempfile::TempDir) -> Self {
-        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, _tmp: tmp }
+        Self { root, show_hidden: false, max_depth: -1, webdav: false, webdav_user: None, webdav_pass: None, webui_auth: false, cors: false, max_upload: None, _tmp: tmp }
     }
 
     fn show_hidden(mut self) -> Self {
@@ -64,6 +66,18 @@ impl TestEnv {
 
     fn webui_auth(mut self) -> Self {
         self.webui_auth = true;
+        self
+    }
+
+    /// Opt into permissive CORS (off by default).
+    fn cors(mut self) -> Self {
+        self.cors = true;
+        self
+    }
+
+    /// Cap a single upload at `bytes`.
+    fn max_upload(mut self, bytes: u64) -> Self {
+        self.max_upload = Some(bytes);
         self
     }
 
@@ -104,6 +118,8 @@ impl TestEnv {
             webdav_user: self.webdav_user.clone(),
             webdav_pass: self.webdav_pass.clone(),
             webui_auth: self.webui_auth,
+            cors: self.cors,
+            max_upload: self.max_upload,
         });
         let mut router = Router::new()
             .route("/", get(handlers::serve_index))
@@ -119,6 +135,14 @@ impl TestEnv {
                 echofs::server::webui_auth_middleware,
             ));
         }
+        if self.cors {
+            router = router.layer(tower_http::cors::CorsLayer::permissive());
+        }
+        // Same outermost layer production applies: guarantees the tests see
+        // the DAV + security headers real responses carry.
+        router = router.layer(axum::middleware::from_fn(
+            echofs::server::response_headers_middleware,
+        ));
         router.with_state(state)
     }
 
@@ -214,6 +238,23 @@ impl TestEnv {
                     .method(method)
                     .uri(uri)
                     .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        TestResponse(resp)
+    }
+
+    /// Send a request with an arbitrary method and a raw byte body.
+    /// Used for uploads too large to spell out as a `&str`.
+    async fn method_with_bytes(&self, method: &str, uri: &str, body: Vec<u8>) -> TestResponse {
+        let resp = self
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
@@ -1682,6 +1723,8 @@ mod lifecycle {
             webdav_user: None,
             webdav_pass: None,
             webui_auth: false,
+            cors: false,
+            max_upload: None,
         }
     }
 
@@ -2212,6 +2255,8 @@ async fn zip_download_applies_speed_limit() {
         webdav_user: None,
         webdav_pass: None,
         webui_auth: false,
+        cors: false,
+        max_upload: None,
     });
     let router = Router::new()
         .route("/", get(handlers::serve_index))
@@ -2234,3 +2279,287 @@ async fn zip_download_applies_speed_limit() {
     );
     assert!(zip_names(&bytes).contains(&"docs/photo.jpg".to_string()));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORS — off by default
+//
+// Regression: the router used to apply CorsLayer::permissive() unconditionally,
+// so with the default (no --webdav-user) ANY web page could script
+// PUT/DELETE/MOVE against a running server. The bundled UI is same-origin and
+// never needed it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Send a CORS preflight for `method` from a foreign origin.
+async fn preflight(env: &TestEnv, uri: &str, method: &str) -> TestResponse {
+    let resp = env
+        .router()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri(uri)
+                .header("Origin", "https://evil.example")
+                .header("Access-Control-Request-Method", method)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    TestResponse(resp)
+}
+
+#[tokio::test]
+async fn cors_preflight_is_denied_by_default() {
+    let env = TestEnv::new().webdav();
+    env.write("a.txt", "hi");
+    let resp = preflight(&env, "/a.txt", "DELETE").await;
+    // No Access-Control-Allow-Origin → the browser blocks the preflight and
+    // never sends the destructive request at all.
+    assert!(
+        resp.header("access-control-allow-origin").is_none(),
+        "CORS must be off by default"
+    );
+}
+
+#[tokio::test]
+async fn cors_preflight_is_granted_when_opted_in() {
+    let env = TestEnv::new().webdav().cors();
+    env.write("a.txt", "hi");
+    let resp = preflight(&env, "/a.txt", "DELETE").await;
+    assert_eq!(
+        resp.header("access-control-allow-origin").as_deref(),
+        Some("*")
+    );
+}
+
+/// The harness above assembles its own router, so it would keep passing even
+/// if `build_router` re-grew an unconditional `CorsLayer::permissive()`. Drive
+/// the real production router here.
+async fn build_router_preflight(cors: bool, method: &str) -> TestResponse {
+    let env = TestEnv::new();
+    env.write("a.txt", "hi");
+    let state = Arc::new(AppState {
+        root: env.root.clone(),
+        show_hidden: false,
+        max_depth: -1,
+        speed_limit: None,
+        webdav: true,
+        webdav_user: None,
+        webdav_pass: None,
+        webui_auth: false,
+        cors,
+        max_upload: None,
+    });
+    let app = echofs::server::build_router(state, echofs::logging::LogTarget::Off);
+    let mut req = Request::builder()
+        .method("OPTIONS")
+        .uri("/a.txt")
+        .header("Origin", "https://evil.example")
+        .header("Access-Control-Request-Method", method)
+        .body(Body::empty())
+        .unwrap();
+    // The access-log middleware extracts ConnectInfo; a bare `oneshot`
+    // request carries none, so supply it.
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8080".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    TestResponse(app.oneshot(req).await.unwrap())
+}
+
+#[tokio::test]
+async fn build_router_denies_cors_preflight_by_default() {
+    let resp = build_router_preflight(false, "DELETE").await;
+    assert!(
+        resp.header("access-control-allow-origin").is_none(),
+        "build_router must not grant CORS unless --cors is set"
+    );
+}
+
+#[tokio::test]
+async fn build_router_grants_cors_preflight_when_enabled() {
+    let resp = build_router_preflight(true, "DELETE").await;
+    assert_eq!(
+        resp.header("access-control-allow-origin").as_deref(),
+        Some("*")
+    );
+}
+
+#[tokio::test]
+async fn cors_absent_on_plain_get_by_default() {
+    let env = TestEnv::new();
+    env.write("a.txt", "hi");
+    let resp = env.get("/a.txt").await;
+    assert!(resp.header("access-control-allow-origin").is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Served-file security headers
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn every_response_is_nosniff() {
+    let env = TestEnv::new();
+    env.write("a.txt", "hi").write("p.html", "<p>x</p>");
+    for uri in ["/a.txt", "/p.html"] {
+        let resp = env.get(uri).await;
+        assert_eq!(
+            resp.header("x-content-type-options").as_deref(),
+            Some("nosniff"),
+            "nosniff missing on {uri}"
+        );
+    }
+}
+
+/// An uploaded `.html` would otherwise execute on the server origin and could
+/// rewrite the whole served tree through WebDAV.
+#[tokio::test]
+async fn scriptable_files_are_neutralized() {
+    let env = TestEnv::new();
+    env.write("page.html", "<script>alert(1)</script>");
+    let resp = env.get("/page.html").await;
+    assert_eq!(
+        resp.header("content-security-policy").as_deref(),
+        Some("default-src 'none'; sandbox")
+    );
+    assert!(resp
+        .header("content-disposition")
+        .as_deref()
+        .unwrap_or("")
+        .contains("attachment"));
+}
+
+/// The mitigation must stay narrow: the media-server path is the point of the
+/// project and must not be turned into downloads.
+#[tokio::test]
+async fn non_scriptable_files_are_served_normally() {
+    let env = TestEnv::new();
+    env.write("photo.png", "png")
+        .write("clip.mp4", "mp4")
+        .write("song.mp3", "mp3")
+        .write("notes.txt", "text")
+        .write("data.json", "{}");
+    for uri in [
+        "/photo.png",
+        "/clip.mp4",
+        "/song.mp3",
+        "/notes.txt",
+        "/data.json",
+    ] {
+        let resp = env.get(uri).await;
+        assert!(
+            resp.header("content-security-policy").is_none(),
+            "{uri} should not be sandboxed"
+        );
+        assert!(
+            resp.header("content-disposition").is_none(),
+            "{uri} should not be forced to download"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUT: streamed to disk, size-capped, atomic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Names currently present in the served root.
+fn root_names(env: &TestEnv) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(&env.root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A multi-megabyte upload must land byte-for-byte. The old implementation
+/// buffered the whole body in memory first; this is the regression guard for
+/// the streaming rewrite (and would OOM a memory-constrained host).
+#[tokio::test]
+async fn put_streams_large_body_to_disk() {
+    let env = TestEnv::new().webdav();
+    let data: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    env.method_with_bytes("PUT", "/big.bin", data.clone())
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    assert_eq!(fs::read(env.root.join("big.bin")).unwrap(), data);
+    // No temp file may survive a successful upload.
+    assert!(
+        root_names(&env)
+            .iter()
+            .all(|n| !n.starts_with(".echofs-upload-")),
+        "temp file left behind: {:?}",
+        root_names(&env)
+    );
+}
+
+#[tokio::test]
+async fn put_over_limit_is_rejected_with_413() {
+    let env = TestEnv::new().webdav().max_upload(1024);
+    env.method_with_body("PUT", "/big.txt", &"x".repeat(4096))
+        .await
+        .assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Regression: the old `fs::write` truncated the existing file before writing,
+/// so a rejected upload destroyed the previous contents.
+#[tokio::test]
+async fn rejected_put_leaves_existing_file_intact() {
+    let env = TestEnv::new().webdav().max_upload(1024);
+    env.write("keep.txt", "original");
+    env.method_with_body("PUT", "/keep.txt", &"x".repeat(4096))
+        .await
+        .assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+
+    assert_eq!(
+        fs::read_to_string(env.root.join("keep.txt")).unwrap(),
+        "original"
+    );
+}
+
+/// A rejected upload must not leave the temp file in the shared folder.
+#[tokio::test]
+async fn rejected_put_leaves_no_temp_file() {
+    let env = TestEnv::new().webdav().max_upload(1024);
+    env.write("keep.txt", "original");
+    env.method_with_body("PUT", "/nope.txt", &"x".repeat(4096))
+        .await
+        .assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+
+    assert_eq!(root_names(&env), vec!["keep.txt".to_string()]);
+}
+
+#[tokio::test]
+async fn put_overwrites_in_place() {
+    let env = TestEnv::new().webdav();
+    env.write("f.txt", "old");
+    env.method_with_body("PUT", "/f.txt", "new longer content")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        fs::read_to_string(env.root.join("f.txt")).unwrap(),
+        "new longer content"
+    );
+}
+
+/// Publishing via rename swaps in a fresh inode, which would otherwise reset
+/// the mode to the umask default — silently widening a private 0600 file to
+/// 0644. The old `fs::write` path kept it, so this pins the behaviour.
+#[cfg(unix)]
+#[tokio::test]
+async fn put_overwrite_preserves_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new().webdav();
+    env.write("private.txt", "old");
+    let path = env.root.join("private.txt");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    env.method_with_body("PUT", "/private.txt", "new")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "mode should survive the overwrite");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+}
+

@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Method, Request, Response};
+use axum::http::{HeaderValue, Method, Request, Response, header};
 use axum::middleware::Next;
 use axum::routing::{any, get};
 use std::net::SocketAddr;
@@ -94,12 +94,21 @@ impl ServerHandle {
     }
 }
 
-/// Middleware that injects DAV headers into every response.
+/// Middleware that injects DAV headers and baseline security headers into
+/// every response.
 /// Applied as the outermost layer so it can modify CORS-preflight OPTIONS responses too.
-async fn dav_headers_middleware(request: Request<Body>, next: Next) -> Response<Body> {
+///
+/// `X-Content-Type-Options: nosniff` stops a browser from re-sniffing a
+/// declared type into an executable one (e.g. serving a `.txt` that is really
+/// HTML). It is safe on every response, including the SPA HTML itself.
+pub async fn response_headers_middleware(request: Request<Body>, next: Next) -> Response<Body> {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert("DAV", "1, 2".parse().expect("valid header"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     if !headers.contains_key("Allow") {
         headers.insert("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK".parse().expect("valid header"));
     }
@@ -132,9 +141,14 @@ pub async fn webui_auth_middleware(
 /// Assemble the Axum router with all middleware layers applied.
 ///
 /// Layer order: last `.layer()` = outermost (processes request first, response
-/// last). We want: request → dav_headers → cors → webui_auth → access_log → handler.
-/// WebDAV auth is enforced inside the WebDAV handlers themselves; the webui_auth
-/// middleware additionally gates browser GET/HEAD access when `--webui-auth` is on.
+/// last). We want: request → response_headers → [cors] → webui_auth →
+/// access_log → handler. WebDAV auth is enforced inside the WebDAV handlers
+/// themselves; the webui_auth middleware additionally gates browser GET/HEAD
+/// access when `--webui-auth` is on.
+///
+/// CORS is applied **only** when `state.cors` is set (see the `--cors` flag):
+/// with permissive CORS on, any web page could script destructive WebDAV
+/// calls at the server, and the bundled UI (same-origin) never needs it.
 pub fn build_router(state: Arc<AppState>, log_target: LogTarget) -> Router {
     let webdav = state.webdav;
     let webui_auth_state = state.clone();
@@ -149,17 +163,24 @@ pub fn build_router(state: Arc<AppState>, log_target: LogTarget) -> Router {
             .route("/{*path}", any(webdav::handle_webdav_path));
     }
 
-    app.layer(axum::middleware::from_fn_with_state(
-        log_target,
-        logging::access_log,
-    ))
-    .layer(axum::middleware::from_fn_with_state(
-        webui_auth_state,
-        webui_auth_middleware,
-    ))
-    .layer(CorsLayer::permissive())
-    .layer(axum::middleware::from_fn(dav_headers_middleware))
-    .with_state(state)
+    let app = app
+        .layer(axum::middleware::from_fn_with_state(
+            log_target,
+            logging::access_log,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            webui_auth_state,
+            webui_auth_middleware,
+        ));
+
+    let app = if state.cors {
+        app.layer(CorsLayer::permissive())
+    } else {
+        app
+    };
+
+    app.layer(axum::middleware::from_fn(response_headers_middleware))
+        .with_state(state)
 }
 
 /// Bind the listener and spawn the server task.
@@ -169,6 +190,7 @@ pub fn build_router(state: Arc<AppState>, log_target: LogTarget) -> Router {
 /// can read the real bound address and decide how to wait or stop. Binding
 /// failures are returned as [`StartError`] rather than terminating the process.
 pub async fn run(config: ServerConfig, log_target: LogTarget) -> Result<ServerHandle, StartError> {
+    let bind_addr = config.bind_addr();
     let state = Arc::new(AppState {
         root: config.root,
         show_hidden: config.show_hidden,
@@ -178,11 +200,13 @@ pub async fn run(config: ServerConfig, log_target: LogTarget) -> Result<ServerHa
         webdav_user: config.webdav_user,
         webdav_pass: config.webdav_pass,
         webui_auth: config.webui_auth,
+        cors: config.cors,
+        max_upload: config.max_upload,
     });
 
     let app = build_router(state, log_target);
 
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.bind, config.port))
+    let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(StartError::Bind)?;
 

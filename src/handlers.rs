@@ -22,6 +22,10 @@ pub struct AppState {
     pub webdav_user: Option<String>,
     pub webdav_pass: Option<String>,
     pub webui_auth: bool,
+    /// Whether to reply with permissive CORS headers (off by default).
+    pub cors: bool,
+    /// Reject uploads larger than this many bytes (`None` = unlimited).
+    pub max_upload: Option<u64>,
 }
 
 /// JSON response wrapper that includes directory listing + server capabilities.
@@ -133,6 +137,27 @@ async fn serve_dir_zip(
     }
 }
 
+/// `Content-Security-Policy` served with script-capable file types.
+///
+/// `sandbox` (with no `allow-scripts`) disables script execution outright and
+/// gives the document an opaque origin, so even a client that renders the
+/// file cannot reach the JSON API or the WebDAV endpoints. `default-src
+/// 'none'` backs that up by blocking every subresource load.
+const NEUTRALIZING_CSP: HeaderValue = HeaderValue::from_static("default-src 'none'; sandbox");
+
+/// Take the teeth out of a file the browser would otherwise run in our origin.
+///
+/// A shared folder holds untrusted content: an uploaded `.html`/`.svg` opened
+/// directly would execute on the server's origin and could rewrite anything
+/// under `--root` through WebDAV. The standard mitigation for user-supplied
+/// content is to force a download; the CSP is belt-and-braces for clients
+/// that ignore `Content-Disposition`. No filename is given, so browsers fall
+/// back to the URL's last segment.
+fn neutralize_scriptable(headers: &mut HeaderMap) {
+    headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    headers.insert(header::CONTENT_SECURITY_POLICY, NEUTRALIZING_CSP);
+}
+
 fn dir_response(listing: directory::DirListing, state: &AppState) -> DirResponse {
     DirResponse {
         listing,
@@ -208,7 +233,12 @@ pub async fn serve_path(
             mime.to_string()
         };
         match range::build_range_response(&resolved, &headers, &content_type, state.speed_limit).await {
-            Ok(resp) => resp,
+            Ok(mut resp) => {
+                if mime_utils::is_scriptable(&mime) {
+                    neutralize_scriptable(resp.headers_mut());
+                }
+                resp
+            }
             Err(e) => AppError::from(e).into_response_for(&headers),
         }
     } else {
