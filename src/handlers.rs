@@ -109,14 +109,12 @@ fn zip_content_disposition(top_name: &str) -> String {
 async fn serve_dir_zip(
     state: &AppState,
     dir: PathBuf,
-    rel_path: &str,
     headers: &HeaderMap,
     method: &axum::http::Method,
 ) -> Response<Body> {
     match zip_stream::zip_dir_body(
         dir,
         &state.root,
-        rel_path,
         state.show_hidden,
         state.max_depth,
         state.speed_limit,
@@ -175,7 +173,7 @@ pub async fn serve_index(
     let full_path = &state.root;
     if full_path.is_dir() {
         if wants_zip_download(&uri) {
-            return serve_dir_zip(&state, state.root.clone(), "", &headers, &method).await;
+            return serve_dir_zip(&state, state.root.clone(), &headers, &method).await;
         }
         let mut resp = if is_ajax(&headers) {
             match directory::list_directory(&state.root, "", state.show_hidden, state.max_depth).await {
@@ -212,7 +210,7 @@ pub async fn serve_path(
 
     if resolved.is_dir() {
         if wants_zip_download(&uri) {
-            return serve_dir_zip(&state, resolved, &rel_path, &headers, &method).await;
+            return serve_dir_zip(&state, resolved, &headers, &method).await;
         }
         let mut resp = if is_ajax(&headers) {
             match directory::list_directory(&state.root, &rel_path, state.show_hidden, state.max_depth).await {

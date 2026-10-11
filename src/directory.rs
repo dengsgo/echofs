@@ -58,7 +58,12 @@ pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool,
         return Err(AppError::BadRequest("Cannot write to root".into()));
     }
 
-    // Block access to hidden files/directories (any path component starting with '.')
+    // Fast-path hidden check on the raw request string. This is only a
+    // pre-filter: the authoritative check runs on the canonicalized parent
+    // below, where the platform's real separator and name-alias semantics
+    // apply (on Windows, `\` is a separator and 8.3 short names expand to the
+    // real name — a lexical '/'-only check would miss `a\.hidden` and
+    // `HIDDEN~1` spellings of hidden components).
     if !show_hidden && has_hidden_component(&rel_path_owned) {
         return Err(AppError::Forbidden("Access to hidden files is denied".into()));
     }
@@ -88,10 +93,31 @@ pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool,
             return Err(AppError::Forbidden("Path traversal denied".into()));
         }
 
-        // Check depth: for files the depth is number of segments,
+        // The parent's path below the root, in canonical form. The security
+        // rulings below operate on real path components, not request strings.
+        let parent_rel = canonical_parent.strip_prefix(&canonical_root).map_err(|_| {
+            AppError::Internal("Resolved parent escaped the root prefix".into())
+        })?;
+
+        // Block hidden components in the (canonical) parent chain, and in the
+        // final target name itself. `target.file_name()` parses with platform
+        // separator semantics, so on Windows a `dir\.hidden` spelling yields a
+        // final name of `.hidden` here.
+        if !show_hidden {
+            let final_hidden = target
+                .file_name()
+                .map(|n| n.as_encoded_bytes().starts_with(b"."))
+                .unwrap_or(false);
+            if path_has_hidden_component(parent_rel) || final_hidden {
+                return Err(AppError::Forbidden("Access to hidden files is denied".into()));
+            }
+        }
+
+        // Check depth: real depth of the parent below the root, plus one for
+        // the target itself — for files the depth is number of segments,
         // for directories (MKCOL) same check applies
         if max_depth >= 0 {
-            let depth = path_depth(&rel);
+            let depth = parent_rel.components().count() as u32 + 1;
             if depth > (max_depth as u32) + 1 {
                 return Err(AppError::Forbidden("Maximum directory depth exceeded".into()));
             }
@@ -106,7 +132,12 @@ pub async fn safe_resolve_parent(root: &Path, rel_path: &str, show_hidden: bool,
 pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_depth: i32) -> Result<PathBuf, AppError> {
     let rel_path_owned = rel_path.trim_start_matches('/').to_string();
 
-    // Block access to hidden files/directories (any path component starting with '.')
+    // Fast-path hidden check on the raw request string. This is only a
+    // pre-filter: the authoritative check runs on the canonicalized path
+    // below, where the platform's real separator and name-alias semantics
+    // apply (on Windows, `\` is a separator and 8.3 short names expand to the
+    // real name — a lexical '/'-only check would miss `a\.hidden` and
+    // `HIDDEN~1` spellings of hidden components).
     if !show_hidden && !rel_path_owned.is_empty() && has_hidden_component(&rel_path_owned) {
         return Err(AppError::Forbidden("Access to hidden files is denied".into()));
     }
@@ -133,12 +164,24 @@ pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_de
             return Err(AppError::Forbidden("Path traversal denied".into()));
         }
 
+        // The resolved path below the root, in canonical form. The security
+        // rulings below operate on real path components, not request strings.
+        let rel_canonical = canonical.strip_prefix(&canonical_root).map_err(|_| {
+            AppError::Internal("Resolved path escaped the root prefix".into())
+        })?;
+
+        // Block access to hidden files/directories (any real path component
+        // starting with '.').
+        if !show_hidden && path_has_hidden_component(rel_canonical) {
+            return Err(AppError::Forbidden("Access to hidden files is denied".into()));
+        }
+
         // Block access beyond maximum directory depth.
         // For directories: the directory's own depth must be within limit.
         // For files: the file's parent directory depth must be within limit,
         // so a file at depth N is allowed if N-1 <= max_depth (i.e. N <= max_depth+1).
         if max_depth >= 0 {
-            let depth = path_depth(&rel);
+            let depth = rel_canonical.components().count() as u32;
             if canonical.is_dir() && depth > max_depth as u32 {
                 return Err(AppError::Forbidden("Maximum directory depth exceeded".into()));
             }
@@ -153,15 +196,33 @@ pub async fn safe_resolve(root: &Path, rel_path: &str, show_hidden: bool, max_de
     .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?
 }
 
-/// Check if any component in the path starts with '.'
+/// Lexical hidden check on a request path: any `/`-separated component
+/// starting with '.'. Used only as a fast-path pre-filter before touching the
+/// filesystem; the authoritative hidden ruling is [`path_has_hidden_component`]
+/// on the canonicalized path, which sees the platform's real components.
 fn has_hidden_component(rel_path: &str) -> bool {
     rel_path.split('/').any(|component| {
         component.starts_with('.')
     })
 }
 
-/// Calculate the depth of a relative path (number of non-empty segments).
-/// "" → 0, "a" → 1, "a/b" → 2, "a/b/c" → 3
+/// Check if any component of a canonicalized relative path is hidden (its
+/// name starts with '.'). Operating on real `Path` components means platform
+/// semantics are already baked in: on Windows `\` separators are real
+/// components here, and 8.3 short names have been expanded to the real name
+/// by canonicalization.
+fn path_has_hidden_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(name) => name.as_encoded_bytes().starts_with(b"."),
+        _ => false,
+    })
+}
+
+/// Lexical depth of a URL-side relative path (number of non-empty `/`
+/// segments). "" → 0, "a" → 1, "a/b" → 2, "a/b/c" → 3
+///
+/// Used for display and listing decisions only; security rulings measure the
+/// canonicalized path's real component count instead (see `safe_resolve`).
 fn path_depth(rel_path: &str) -> u32 {
     if rel_path.is_empty() {
         return 0;
@@ -433,6 +494,63 @@ mod tests {
 
         assert!(safe_resolve(&root, "/.secret", false, -1).await.is_err());
         assert!(safe_resolve(&root, "public/.hidden/secret.txt", false, -1).await.is_err());
+    }
+
+    /// Regression for the `%5C` bypass: on Windows `\` is a real path
+    /// separator, so `public\.hidden\secret.txt` used to slip past the
+    /// '/'-only lexical hidden check while `join`/`canonicalize` still
+    /// descended into `.hidden`. The ruling now happens on the canonicalized
+    /// path's real components.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn safe_resolve_backslash_hidden_denied() {
+        let (_tmp, root) = tmp_root();
+        fs::create_dir_all(root.join("public/.hidden")).unwrap();
+        fs::write(root.join("public/.hidden/secret.txt"), "data").unwrap();
+
+        // Read path: hidden component in the middle of a backslash path.
+        assert!(safe_resolve(&root, r"public\.hidden\secret.txt", false, -1).await.is_err());
+        // Write paths: hidden component in the parent chain, and as the
+        // final (to-be-created) name itself.
+        assert!(safe_resolve_parent(&root, r"public\.hidden\new.txt", false, -1).await.is_err());
+        assert!(safe_resolve_parent(&root, r"public\.newhidden", false, -1).await.is_err());
+        // Sanity: the visible sibling stays reachable with either spelling.
+        fs::write(root.join("public/ok.txt"), "ok").unwrap();
+        assert!(safe_resolve(&root, r"public\ok.txt", false, -1).await.is_ok());
+    }
+
+    /// Same root cause, second ruling: a `\`-separated path used to count as
+    /// a single '/'-segment, so `--max-depth` was bypassed on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn safe_resolve_backslash_depth_denied() {
+        let (_tmp, root) = tmp_root();
+        fs::create_dir_all(root.join("a/b/c")).unwrap();
+        fs::write(root.join("a/b/file.txt"), "x").unwrap();
+        fs::write(root.join("a/b/c/deep.txt"), "x").unwrap();
+
+        // File at depth 4 is over the limit (max_depth 2 allows files to
+        // depth 3), whichever separator spelling the request uses.
+        assert!(safe_resolve(&root, "a/b/c/deep.txt", false, 2).await.is_err());
+        assert!(safe_resolve(&root, r"a\b\c\deep.txt", false, 2).await.is_err());
+        // Write side: target whose canonical parent sits at depth 3.
+        assert!(safe_resolve_parent(&root, r"a\b\c\new.txt", false, 2).await.is_err());
+        // File at depth 3 stays allowed with either spelling.
+        assert!(safe_resolve(&root, r"a\b\file.txt", false, 2).await.is_ok());
+        assert!(safe_resolve_parent(&root, r"a\b\new.txt", false, 2).await.is_ok());
+    }
+
+    /// On Unix, `\` is a legal filename character, NOT a separator: a file
+    /// named `a\.hidden` is a single component and does not start with '.',
+    /// so it must remain accessible. (Ruling on canonical components keeps
+    /// this a non-event; a naive split on both separators would be a false
+    /// positive here.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn safe_resolve_backslash_is_literal_on_unix() {
+        let (_tmp, root) = tmp_root();
+        fs::write(root.join(r"a\.hidden"), "data").unwrap();
+        assert!(safe_resolve(&root, r"a\.hidden", false, -1).await.is_ok());
     }
 
     // ─── list_directory ───

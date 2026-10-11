@@ -652,6 +652,50 @@ async fn path_traversal_denied() {
     );
 }
 
+/// Regression (Windows): `%5C` decodes to `\`, which the Windows filesystem
+/// treats as a path separator. The hidden-file ruling used to split the
+/// request string on '/' only, so `public%5C.hidden%5Csecret.txt` sailed
+/// through the check while `join`/`canonicalize` still descended into
+/// `.hidden` — over both read (GET/PROPFIND) and write (PUT/DELETE/MKCOL)
+/// interfaces. The ruling now runs on the canonicalized path's real
+/// components.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_backslash_cannot_reach_hidden_files() {
+    let env = TestEnv::new().webdav();
+    env.write("public/.hidden/secret.txt", "secret");
+    env.write("public/ok.txt", "ok");
+
+    // Read interfaces.
+    env.get("/public%5C.hidden%5Csecret.txt").await.assert_status(StatusCode::FORBIDDEN);
+    env.propfind("/public%5C.hidden", "1").await.assert_status(StatusCode::FORBIDDEN);
+    // Write interfaces: hidden component in the parent chain, and as the
+    // final (to-be-created) name.
+    env.method_with_body("PUT", "/public%5C.hidden%5Cnew.txt", "x").await.assert_status(StatusCode::FORBIDDEN);
+    env.method("DELETE", "/public%5C.hidden%5Csecret.txt").await.assert_status(StatusCode::FORBIDDEN);
+    env.method("MKCOL", "/public%5C.newhidden").await.assert_status(StatusCode::FORBIDDEN);
+    // Baselines: the '/' spelling was already denied; visible files unaffected.
+    env.get("/public/.hidden/secret.txt").await.assert_status(StatusCode::FORBIDDEN);
+    env.get("/public/ok.txt").await.assert_status(StatusCode::OK);
+}
+
+/// Regression (Windows): depth is now measured on the canonicalized path, so
+/// a `%5C`-separated chain can no longer undercount its real depth to slip
+/// past `--max-depth`.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_backslash_cannot_bypass_max_depth() {
+    let env = TestEnv::new().max_depth(2);
+    env.write("a/b/c/deep.txt", "deep");
+    env.write("a/b/shallow.txt", "shallow");
+
+    // Depth-4 file: over the limit with either separator spelling.
+    env.get("/a/b/c/deep.txt").await.assert_status(StatusCode::FORBIDDEN);
+    env.get("/a%5Cb%5Cc%5Cdeep.txt").await.assert_status(StatusCode::FORBIDDEN);
+    // Depth-3 file: still served with either spelling.
+    env.get("/a%5Cb%5Cshallow.txt").await.assert_status(StatusCode::OK);
+}
+
 #[tokio::test]
 async fn nonexistent_file_404() {
     let env = TestEnv::new();
@@ -2180,6 +2224,22 @@ async fn zip_download_respects_max_depth() {
     let body = env.get("/docs/?download=zip").await.assert_status(StatusCode::OK).bytes().await;
     // docs is at depth 1; docs/deep (depth 2) is beyond --max-depth 1.
     assert_eq!(zip_names(&body), vec!["docs/", "docs/top.txt"]);
+}
+
+/// Regression (Windows): the ZIP walk's `--max-depth` accounting is anchored
+/// to the canonicalized start dir, so a `%5C`-spelled URL cannot undercount
+/// its base depth and archive deeper than direct serving would allow.
+#[cfg(windows)]
+#[tokio::test]
+async fn zip_download_backslash_url_respects_max_depth() {
+    let env = TestEnv::new().max_depth(2);
+    env.write("a/b/ok.txt", "o");
+    env.write("a/b/c/x.txt", "x");
+
+    // `/a%5Cb` is the dir a/b at real depth 2; the dir c (depth 3) is beyond
+    // --max-depth 2 and must not appear in the archive.
+    let body = env.get("/a%5Cb?download=zip").await.assert_status(StatusCode::OK).bytes().await;
+    assert_eq!(zip_names(&body), vec!["b/", "b/ok.txt"]);
 }
 
 #[cfg(unix)]

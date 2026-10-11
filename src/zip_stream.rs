@@ -41,9 +41,11 @@ struct ZipEntry {
 /// Build a streaming response body containing `dir` as a ZIP archive, plus the
 /// archive's top-level folder name (for the download filename).
 ///
-/// `rel_from_root` is `dir`'s path relative to `root` ("" when archiving the
-/// root itself); it anchors the `--max-depth` accounting so zipped content is
-/// limited to exactly what the server would also serve directly.
+/// The archived dir's depth below `root` anchors the `--max-depth` accounting,
+/// so zipped content is limited to exactly what the server would also serve
+/// directly. It is measured on canonicalized paths: a lexical count of the
+/// request path would undercount when the request spells separators as `\`
+/// on Windows.
 ///
 /// With `head_only` (a HEAD request) the walk and compression are skipped
 /// entirely and the body is empty — download managers probing with HEAD
@@ -51,17 +53,12 @@ struct ZipEntry {
 pub async fn zip_dir_body(
     dir: PathBuf,
     root: &Path,
-    rel_from_root: &str,
     show_hidden: bool,
     max_depth: i32,
     speed_limit: Option<u64>,
     head_only: bool,
 ) -> Result<(Body, String), AppError> {
     let root = root.to_path_buf();
-    let base_depth = rel_from_root
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .count() as u32;
 
     // Walk happens before the response starts, so failures here still produce
     // a proper HTTP error instead of a truncated archive.
@@ -76,6 +73,10 @@ pub async fn zip_dir_body(
         if head_only {
             return Ok::<_, AppError>((Vec::new(), top_name));
         }
+        let base_depth = dir
+            .strip_prefix(&canonical_root)
+            .map(|rel| rel.components().count() as u32)
+            .map_err(|_| AppError::Internal("Archive directory escaped the root prefix".into()))?;
         let entries = collect_entries(
             &dir,
             &canonical_root,
