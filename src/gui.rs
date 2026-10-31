@@ -279,6 +279,9 @@ struct EchoApp {
     root: String,
     bind: String,
     port: String,
+    /// Checked = ignore the port field and ask the OS for a free ephemeral
+    /// port (binds port 0; the assigned port is read back from `local_addr`).
+    random_port: bool,
     show_hidden: bool,
     max_depth: String,
     speed_limit: String,
@@ -326,6 +329,8 @@ impl EchoApp {
             root,
             bind: args.bind.clone(),
             port: args.port.to_string(),
+            // `--port 0` means OS-assigned, so reflect that in the checkbox.
+            random_port: args.port == 0,
             show_hidden: args.show_hidden,
             max_depth,
             speed_limit: args.speed_limit.clone().unwrap_or_default(),
@@ -371,11 +376,16 @@ impl EchoApp {
             return Err(tr(lang, "Bind address must not be empty", "绑定地址不能为空").to_string());
         }
 
-        let port: u16 = self
-            .port
-            .trim()
-            .parse()
-            .map_err(|_| format!("{}: {}", tr(lang, "Invalid port", "端口无效"), self.port))?;
+        let port: u16 = if self.random_port {
+            // 0 asks the OS for a free ephemeral port when the listener binds;
+            // the assigned port travels back via `ServerHandle::local_addr`.
+            0
+        } else {
+            self.port
+                .trim()
+                .parse()
+                .map_err(|_| format!("{}: {}", tr(lang, "Invalid port", "端口无效"), self.port))?
+        };
 
         let max_depth: i32 = if self.max_depth.trim().is_empty() {
             -1
@@ -449,21 +459,19 @@ impl EchoApp {
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(LOG_CHANNEL_CAP);
         let log_target = LogTarget::Channel(tx);
 
-        let open_url = if self.open_browser {
-            Some(format!("http://127.0.0.1:{}", config.port))
-        } else {
-            None
-        };
-
         match self.rt.block_on(server::run(config, log_target)) {
             Ok(handle) => {
-                self.local_addr = Some(handle.local_addr);
+                let local_addr = handle.local_addr;
+                self.local_addr = Some(local_addr);
                 self.handle = Some(handle);
                 self.log_rx = Some(rx);
                 self.logs.clear();
                 self.status = Status::Running;
-                if let Some(url) = open_url {
-                    let _ = open::that(url);
+                if self.open_browser {
+                    // Build the URL from the *actual* bound port: with a
+                    // random port the OS assigns one only once the listener
+                    // has bound, so `config.port` may be a meaningless 0.
+                    let _ = open::that(format!("http://127.0.0.1:{}", local_addr.port()));
                 }
             }
             Err(e) => {
@@ -634,7 +642,21 @@ impl eframe::App for EchoApp {
                         ui.end_row();
 
                         ui.label(tr(lang, "Port", "端口"));
-                        ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(100.0));
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.random_port, tr(lang, "Random", "随机"))
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Listen on a free port chosen by the OS",
+                                    "由系统自动选取可用端口监听",
+                                ));
+                            // Grayed out while random is on; keeps its value so
+                            // unchecking restores the manual port unchanged.
+                            ui.add_enabled_ui(!self.random_port, |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.port).desired_width(100.0),
+                                );
+                            });
+                        });
                         ui.end_row();
 
                         ui.label(tr(lang, "Max depth", "最大深度"));
@@ -864,5 +886,30 @@ mod tests {
         for lang in Lang::ALL {
             assert!(!lang.native_name().is_empty());
         }
+    }
+
+    fn form_with(port: &str, random_port: bool) -> EchoApp {
+        use clap::Parser as _;
+        let rt = Arc::new(tokio::runtime::Runtime::new().expect("test runtime"));
+        let mut app = EchoApp::new(Args::parse_from(["echofs"]), rt);
+        app.root = ".".to_string();
+        app.bind = "127.0.0.1".to_string();
+        app.port = port.to_string();
+        app.random_port = random_port;
+        app
+    }
+
+    #[test]
+    fn build_config_random_port_binds_zero_and_skips_input_parsing() {
+        // Random on: stale/garbage input must not block startup with port 0.
+        let app = form_with("not a number", true);
+        assert_eq!(app.build_config().expect("config builds").port, 0);
+
+        // Random off: the field is parsed and validated as before.
+        let app = form_with("8080", false);
+        assert_eq!(app.build_config().expect("config builds").port, 8080);
+
+        let app = form_with("not a number", false);
+        assert!(app.build_config().is_err());
     }
 }
