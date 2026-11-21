@@ -210,7 +210,7 @@ cargo build --release --features gui
 之后即可正常启动。如需自行构建应用包：
 
 ```bash
-./scripts/make-icon.sh          # 从 assets/icon.svg 重新生成 assets/echofs.icns（可选）
+./scripts/make-icon.sh          # 从 assets/icon.svg 与 icon-window.svg 重新生成图标资产（可选）
 
 # 单一架构（→ target/macos/EchoFS.app、EchoFS-darwin-<架构>.dmg、echofs-darwin-<架构>-gui.tar.gz）
 ./scripts/make-macos-app.sh --dmg --target aarch64-apple-darwin   # Apple Silicon

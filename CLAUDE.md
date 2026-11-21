@@ -13,7 +13,7 @@ cargo build --release  # Build release binary
 cargo check --features gui    # Compile-check with the desktop GUI
 cargo build --release --features gui  # Build with the desktop GUI
 ./scripts/make-macos-app.sh --dmg     # Build macOS EchoFS.app + .dmg (universal, ad-hoc signed)
-./scripts/make-icon.sh                # Regenerate assets/echofs.icns from assets/icon.svg
+./scripts/make-icon.sh                # Regenerate the committed icon assets (icns + window png + exe ico) from assets/icon.svg & icon-window.svg
 ```
 
 ## Architecture
@@ -40,10 +40,12 @@ src/
 tests/
   integration_test.rs — Integration tests via tower::ServiceExt::oneshot(); plus lifecycle mod (real listener + graceful shutdown)
 assets/
-  icon.svg      — App icon source (Big Sur squircle + folder/echo-waves glyph); echofs.icns generated from it (committed)
+  icon.svg        — App icon source, macOS Big Sur grid (824/1024 squircle + margins + folder/echo-waves glyph); echofs.icns generated from it (committed)
+  icon-window.svg — Full-bleed squircle variant; icon-window.png (eframe runtime window icon) and echofs.ico (Windows exe resource) generated from it (committed)
 scripts/
-  make-icon.sh       — Rasterize icon.svg → echofs.icns (needs rsvg-convert + iconutil)
+  make-icon.sh       — Rasterize both SVGs → echofs.icns + icon-window.png + echofs.ico (needs rsvg-convert or cairosvg + python3; iconutil for the icns)
   make-macos-app.sh  — Build EchoFS.app (universal via lipo) + optional .dmg; ad-hoc codesigns
+build.rs          — Windows only: embeds assets/echofs.ico into the exe via winresource (target-gated build-dependency); failure is a non-fatal cargo:warning
 ```
 
 ## Key Conventions
@@ -55,6 +57,7 @@ scripts/
 - **GUI entry dispatch** — `main.rs` runs the GUI when a gui-enabled build is started with `--gui` OR with zero CLI args; any argument runs headless. The default (no-gui) build always runs headless.
 - **Manual Tokio runtime** — `main.rs` builds the runtime explicitly (not `#[tokio::main]`) so the GUI can own the main thread (required by native windowing on macOS).
 - **macOS .app bundle** — `scripts/make-macos-app.sh` builds `EchoFS.app` + `.dmg` + a standalone `echofs-<label>-gui.tar.gz`. With `--target <triple>` it builds one arch (label `darwin-amd64`/`darwin-arm64`); without, a universal (`lipo` x86_64+arm64, label `universal`). Ad-hoc signed (`codesign -s -`), NOT notarized — Gatekeeper warns on first launch (README documents the right-click-Open / `xattr` workaround). `echofs.icns` is committed so CI needs no SVG rasterizer. The `macos-app` CI job is a 2-arch matrix producing per-chip `.dmg` + GUI-binary release artifacts (Intel and Apple Silicon shipped separately, not universal).
+- **Two icon grids** — `assets/icon.svg` is the macOS Big Sur grid (squircle at 824/1024 with baked-in margins — correct there because macOS shows all icons through that grid). `assets/icon-window.svg` is full-bleed for everything Windows shows as-is: `icon-window.png` is the eframe window icon in gui.rs (a Big Sur-grid bitmap would render ~80% size in the Windows taskbar), and `echofs.ico` (16/24/32/48 as DIB, 64/128/256 as PNG entries) is compiled into the exe by build.rs. All outputs are committed (`make-icon.sh`); regenerating needs rsvg-convert/cairosvg + python3, iconutil only for the icns.
 - **Server lifecycle** — `server::run(ServerConfig, LogTarget)` binds the listener and returns `Result<ServerHandle, StartError>` (no `process::exit` inside); supports port 0 (OS-assigned, read back via `local_addr`) and graceful shutdown via `ServerHandle::stop()`. CLI/GUI build `ServerConfig`; handlers still use `AppState` (built inside `run`).
 - **egui 0.35 note** — `App::ui(&mut self, &mut Ui, ..)` (not `update`); wrap the body in `CentralPanel` or empty regions show the near-black window clear-color. Panels (`Panel::top`/`CentralPanel`) take `&mut Ui`. Verify egui APIs against the installed crate source — the version here postdates older API memory.
 - **GUI i18n** — the desktop GUI is bilingual (English / 简体中文), hand-rolled in `gui.rs` (no i18n crate): a `Lang` enum + `tr(lang, en, zh)` helper with translations inline at each call site. `Lang::detect()` picks the initial language from the OS locale via `system_locale()` (checks `LC_*`/`LANG` env vars, then a per-OS fallback for GUI launches that inherit none — `defaults read -g AppleLocale` on macOS, `GetUserDefaultLocaleName` FFI on Windows; Linux desktop sessions propagate `LANG`). `from_locale()` is split out and unit-tested. A header combo box switches language at runtime (even while running). The choice is not persisted — re-detected each launch.

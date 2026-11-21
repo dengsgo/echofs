@@ -211,7 +211,7 @@ Because the app is only **ad-hoc signed** (not notarized with a paid Apple Devel
 Subsequent launches open normally. To build the bundle yourself:
 
 ```bash
-./scripts/make-icon.sh          # regenerate assets/echofs.icns from assets/icon.svg (optional)
+./scripts/make-icon.sh          # regenerate committed icon assets from assets/icon.svg & icon-window.svg (optional)
 
 # Single arch (→ target/macos/EchoFS.app, EchoFS-darwin-<arch>.dmg, echofs-darwin-<arch>-gui.tar.gz)
 ./scripts/make-macos-app.sh --dmg --target aarch64-apple-darwin   # Apple Silicon
